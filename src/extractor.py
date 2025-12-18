@@ -8,22 +8,16 @@ logger = logging.getLogger(__name__)
 class ProspectusExtractor:
     def __init__(self):
         self.keywords = ['股利分配', '现金分红', '利润分配']
-        self.context_positive = ['每10股', '派发现金', '含税', '实施完毕', '分红金额', '现金分红', '报告期', '最近三年']
+        self.context_positive = ['每10股', '派发现金', '含税', '实施完毕', '分红金额', '现金分红', '报告期', '最近三年', '分配方案']
         self.context_negative = ['风险', '不确定性', '......', '目录', '详见', '参见', '分配政策', '分配原则', '章程', '规划', '未来']
-        # 正则表达式匹配“年度”和“金额”
-        self.year_pattern = re.compile(r'20[1-2][0-9]年?')
+        self.year_pattern = re.compile(r'(201[5-9]|202[0-9])') 
         self.amount_pattern = re.compile(r'(\d{1,3}(,\d{3})*(\.\d+)?)')
-        self.year_check_pattern = re.compile(r'20(16|17|18|19|20|21|22|23)')
-
+        
     def extract(self, pdf_path):
-        """
-        从 PDF 中提取分红数据
-        返回: list of dict [{'year': '2020', 'amount': 1000.0, 'page': 123}]
-        """
         result = []
         try:
             with pdfplumber.open(pdf_path) as pdf:
-                # 1. 定位目标页面
+                # 1. Locate target pages
                 target_pages = self._locate_target_pages(pdf)
                 if not target_pages:
                     logger.warning(f"未定位到分红章节: {pdf_path}")
@@ -31,32 +25,28 @@ class ProspectusExtractor:
                 
                 logger.info(f"定位到目标页面: {target_pages}")
 
-                # 2. 尝试从目标页面及其后几页提取数据
-                # 扩大搜索范围：通常“具体分红情况”在“分红政策”章节之后 1-3 页
                 pages_to_scan = set()
                 for p in target_pages:
-                    for offset in range(4): # 扫描当前页及后3页
+                    # Scan current page + next 2 pages (reduced to avoid noise, but enough for tables)
+                    for offset in range(3): 
                         if p + offset < len(pdf.pages):
                             pages_to_scan.add(p + offset)
                 
-                logger.info(f"扩展后的扫描页面: {sorted(list(pages_to_scan))}")
-
                 for page_num in sorted(list(pages_to_scan)):
                     page = pdf.pages[page_num]
                     
-                    # 优先尝试提取表格
+                    # A. Table Extraction
                     tables = page.extract_tables()
                     data_from_table = self._process_tables(tables, page_num)
                     if data_from_table:
                         result.extend(data_from_table)
                     
-                    # 总是尝试正则提取文本（因为有些表格可能是排版错乱的，或者数据在正文中）
+                    # B. Text Extraction (Fallback)
                     text = page.extract_text()
                     data_from_text = self._process_text(text, page_num)
                     if data_from_text:
                         result.extend(data_from_text)
                 
-                # 3. 去重和清洗
                 return self._clean_result(result)
 
         except Exception as e:
@@ -64,15 +54,12 @@ class ProspectusExtractor:
             return []
 
     def _locate_target_pages(self, pdf):
-        """
-        定位可能包含分红数据的页码
-        """
         scores = {}
         total_pages = len(pdf.pages)
-        
-        # 跳过前30页（通常是目录）和最后几页（附录）
-        start_page = min(30, total_pages // 10)
-        end_page = max(total_pages - 10, int(total_pages * 0.9))
+        # Scan from page 5 to 90%
+        # Important: Many prospectus have "Major Financial Indicators" in pages 10-30
+        start_page = 5 
+        end_page = max(total_pages - 10, int(total_pages * 0.95))
 
         for i in range(start_page, end_page):
             try:
@@ -83,44 +70,41 @@ class ProspectusExtractor:
                 
                 score = 0
                 
-                # 基础关键词匹配
+                # Check for "Cash Dividend" keywords specifically for high score
+                if '现金分红' in text:
+                    score += 15
+                
                 for kw in self.keywords:
                     if kw in text:
-                        score += 10
+                        score += 5
                 
                 if score == 0:
                     continue
 
-                # 必须包含具体年份才可能是历史数据
-                if self.year_check_pattern.search(text):
-                    score += 20
+                if self.year_pattern.search(text):
+                    score += 10
                 else:
-                    score -= 20 # 没有年份通常是纯政策描述
+                    score -= 10 
 
-                # 上下文加分
                 for cw in self.context_positive:
                     if cw in text:
                         score += 5
                 
-                # 负面词减分
                 for nw in self.context_negative:
                     if nw in text:
-                        score -= 15 # 加大负面词惩罚
+                        score -= 15
                 
-                # 标题特征 (简单判断：关键词是否在某一行单独出现，或者行首)
                 lines = text.split('\n')
                 for line in lines:
                     line = line.strip()
+                    # Check for section titles like "九、股利分配情况"
                     if any(kw in line for kw in self.keywords):
-                        # 如果这行很短，或者是加粗标题格式（pdfplumber难判断加粗，但可以判断长度）
-                        if len(line) < 30 and (line.startswith('十') or line.startswith('九') or line.startswith('（')):
-                            score += 20
-                        # 目录特征
-                        if '......' in line:
-                            score -= 50
-                        # 政策/规划章节特征
+                        if len(line) < 40 and (line.startswith('十') or line.startswith('九') or line.startswith('（') or line[0].isdigit()):
+                            score += 25
+                        if '......' in line: 
+                            score -= 50 # TOC
                         if '政策' in line or '规划' in line or '原则' in line:
-                            score -= 30
+                            score -= 10
 
                 if score > 15:
                     scores[i] = score
@@ -128,128 +112,167 @@ class ProspectusExtractor:
             except Exception:
                 continue
         
-        # 返回分数最高的前 3 页
+        # Return top 5 candidates now, to catch both Summary and Detailed sections
         sorted_pages = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-        return [p[0] for p in sorted_pages[:3]]
+        return [p[0] for p in sorted_pages[:5]]
 
     def _process_tables(self, tables, page_num):
-        """
-        处理提取到的表格
-        """
         extracted_data = []
         if not tables:
             return []
 
-        for table in tables:
-            # 检查表头
-            # 我们寻找包含 "年度" 和 "分红"|"金额" 的列
-            # 很多表格第一行是header
+        for i, table in enumerate(tables):
+            table_str = str(table)
+            # Pre-filter table: must contain keywords to be relevant?
+            # Not necessarily, sometimes the header is outside.
+            # But usually it contains "分红" or "金额" or years.
             
-            # 扁平化处理，寻找包含年份的行
+            # Strategy 1: Vertical (Header has Years)
+            header_year_map = {} 
+            header_row_idx = -1
+            
+            for r_idx, row in enumerate(table):
+                current_row_years = {}
+                for c_idx, cell in enumerate(row):
+                    if not cell: continue
+                    cell_str = str(cell).replace('\n', '')
+                    matches = self.year_pattern.findall(cell_str)
+                    if matches:
+                        valid_years = [y for y in matches if 2010 <= int(y) <= 2030]
+                        if valid_years:
+                            # Use the last valid year found in the cell (e.g. 2022.12.31/2022年度 -> 2022)
+                            current_row_years[c_idx] = valid_years[-1]
+                
+                if len(current_row_years) >= 1:
+                    header_year_map = current_row_years
+                    header_row_idx = r_idx
+                    break 
+            
+            if header_year_map:
+                for r_idx in range(header_row_idx + 1, len(table)):
+                    row = table[r_idx]
+                    row_text = ''.join([str(c) for c in row if c])
+                    
+                    if '分红' in row_text or '股利' in row_text or '派发' in row_text:
+                        for col_idx, year in header_year_map.items():
+                            if col_idx < len(row):
+                                cell_val = row[col_idx]
+                                amount = self._parse_amount(cell_val)
+                                if amount is not None:
+                                    extracted_data.append({
+                                        'year': year,
+                                        'amount': amount,
+                                        'page': page_num + 1,
+                                        'type': 'table_vertical'
+                                    })
+            
+            # Strategy 2: Horizontal (Year in Row)
             for row in table:
-                # 清洗 None
-                row = [str(cell).strip() if cell else '' for cell in row]
-                row_text = ' '.join(row)
+                row_clean = [str(c).replace('\n', '').strip() if c else '' for c in row]
+                row_text = ' '.join(row_clean)
                 
-                # 匹配年份 (2019-2023)
-                year_match = self.year_pattern.search(row_text)
-                if not year_match:
+                year_matches = self.year_pattern.findall(row_text)
+                if not year_matches:
                     continue
+                years = sorted(list(set([y for y in year_matches if 2010 <= int(y) <= 2030])))
+                if not years: continue
                 
-                year = year_match.group()
-                
-                # 寻找金额
-                # 简单的启发式：寻找行中最大的数字，或者出现在“现金分红”列下的数字
-                # 这里做简化处理：提取行中所有的数字，假设分红金额通常较大（但不是年份）
+                year = years[0]
+
+                # Row must contain keyword
+                if not ('分红' in row_text or '股利' in row_text or '派发' in row_text):
+                     continue
                 
                 amounts = []
-                for cell in row:
-                    # 去除逗号
-                    cell_clean = cell.replace(',', '')
-                    try:
-                        val = float(cell_clean)
-                        # 排除年份本身
-                        if 2010 < val < 2030: 
-                            continue
-                        if val > 0:
-                            amounts.append(val)
-                    except ValueError:
-                        continue
+                for cell in row_clean:
+                    amt = self._parse_amount(cell)
+                    if amt is not None:
+                        # Ensure it's not the year
+                        if 2010 <= amt <= 2030: continue
+                        amounts.append(amt)
                 
                 if amounts:
-                    # 假设最大的那个是分红金额（这有风险，可能是股本）
-                    # 更好的逻辑是结合表头，但表头很难通用解析
-                    # 此时记录所有候选，留给后续清洗
-                    extracted_data.append({
+                     val = max(amounts) # Best guess
+                     extracted_data.append({
                         'year': year,
-                        'amount_candidates': amounts,
-                        'page': page_num + 1, # 人类阅读习惯从1开始
-                        'raw_row': row
+                        'amount': val,
+                        'page': page_num + 1,
+                        'type': 'table_horizontal'
                     })
 
         return extracted_data
 
+    def _parse_amount(self, cell_text):
+        if not cell_text: return None
+        text = str(cell_text).replace('\n', '').replace(' ', '')
+        
+        if text in ['-', '/', '—', 'None', 'N/A']:
+            return 0.0
+            
+        clean_text = text.replace(',', '').replace('万元', '').replace('元', '').replace('%', '')
+        
+        try:
+            val = float(clean_text)
+            if val < 0: return 0.0
+            
+            is_yuan = '元' in str(cell_text) and '万元' not in str(cell_text)
+            
+            # 200,000 threshold
+            if is_yuan or val > 200000: 
+                val = val / 10000
+                
+            return val
+        except ValueError:
+            return None
+
     def _process_text(self, text, page_num):
-        """
-        从文本中正则提取
-        模式：20xx年度......现金分红......xxx万元
-        """
         results = []
+        if not text: return []
+        
         lines = text.split('\n')
         for line in lines:
-            year_match = self.year_pattern.search(line)
-            if year_match and ('分红' in line or '派发' in line):
-                # 提取金额
-                # 寻找 "xxx万元" 或 "xxx元"
-                amount_match = re.search(r'(\d{1,3}(,\d{3})*(\.\d+)?)\s*(万?元)', line)
-                if amount_match:
-                    amount_str = amount_match.group(1).replace(',', '')
-                    unit = amount_match.group(4)
-                    try:
-                        val = float(amount_str)
-                        if '万' not in unit: # 如果单位是元，转换为万元
-                            val = val / 10000
-                        
-                        results.append({
-                            'year': year_match.group(),
-                            'amount': val,
-                            'page': page_num + 1,
-                            'source': 'text'
-                        })
-                    except ValueError:
-                        continue
+            if ('分红' in line or '派发' in line) and self.year_pattern.search(line):
+                year = self.year_pattern.search(line).group()
+                # Pattern: 1000.00万元
+                matches = re.findall(r'(\d{1,3}(,\d{3})*(\.\d+)?)\s*(万?元)', line)
+                if matches:
+                    for m in matches:
+                        amt_str = m[0].replace(',', '')
+                        unit = m[3]
+                        try:
+                            val = float(amt_str)
+                            if '万' not in unit: 
+                                val = val / 10000
+                            results.append({
+                                'year': year,
+                                'amount': val,
+                                'page': page_num + 1,
+                                'type': 'text'
+                            })
+                        except:
+                            pass
         return results
 
     def _clean_result(self, raw_results):
-        """
-        清洗和去重
-        """
         final_data = {}
         for item in raw_results:
             year = item['year']
-            # 标准化年份
             if '年' in year:
-                year = year.replace('年', '')
+                year = year.split('年')[0]
             
-            # 如果已有该年份数据，保留金额较大的（通常是准确的，或者是合计数）
-            # 或者保留来自表格的数据优先
+            amount = item['amount']
             
-            amount = 0
-            if 'amount' in item:
-                amount = item['amount']
-            elif 'amount_candidates' in item:
-                # 简单策略：取最大值
-                amount = max(item['amount_candidates']) if item['amount_candidates'] else 0
-            
-            # 过滤异常值
-            if amount < 10 or amount > 10000000: # 太小或太大都不对（单位万元）
+            # Ignore tiny
+            if 0 < amount < 1: 
                 continue
-                
-            if year not in final_data:
-                final_data[year] = {'year': year, 'amount': amount, 'page': item['page']}
+
+            if year in final_data:
+                if final_data[year]['amount'] == 0 and amount > 0:
+                    final_data[year] = item
+                elif amount > final_data[year]['amount']:
+                     if amount < 2000000: # Reasonable cap
+                        final_data[year] = item
             else:
-                # Update logic
-                if amount > final_data[year]['amount']:
-                    final_data[year] = {'year': year, 'amount': amount, 'page': item['page']}
-        
-        return list(final_data.values())
+                final_data[year] = item
+
+        return sorted(final_data.values(), key=lambda x: x['year'], reverse=True)
