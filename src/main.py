@@ -1,14 +1,35 @@
 import os
+import sys
+import time
+import logging
 import argparse
 import pandas as pd
-import logging
-import time
 import threading
 import json
 from tqdm import tqdm
-from downloader import Downloader
-from extractor import ProspectusExtractor
-from config import DATA_DIR, PDF_DIR, OUTPUT_DIR
+
+# Global Exception Handler to prevent flash-quit
+def exception_hook(exctype, value, traceback):
+    print(f"\n[FATAL ERROR] 脚本发生严重错误 (Critical Error):")
+    print(f"{exctype.__name__}: {value}")
+    import traceback as tb
+    tb.print_tb(traceback)
+    print("\n程序已停止。请截图并联系开发者。")
+    input("按回车键退出... (Press Enter to exit)")
+    sys.exit(1)
+
+sys.excepthook = exception_hook
+
+# Delayed imports to allow exception hook to catch import errors
+try:
+    from downloader import Downloader
+    from extractor import ProspectusExtractor
+    from config import DATA_DIR, PDF_DIR, OUTPUT_DIR
+except ImportError as e:
+    print(f"\n[ERROR] 依赖库加载失败: {e}")
+    print("请尝试重新运行脚本，或者手动执行: pip install -r requirements.txt")
+    input("按回车键退出...")
+    sys.exit(1)
 
 # 设置日志
 logging.basicConfig(
@@ -31,12 +52,11 @@ def save_results(all_dividends, processed_files=None):
         df = df[cols]
         
         output_file = os.path.join(OUTPUT_DIR, 'dividends_summary.xlsx')
-        # If file exists, merge? For now simpler to overwrite with full in-memory list
-        # But for resume support, we should append or read existing.
-        # Since we load everything into memory for this script version, overwriting is safe *if* we started with empty.
-        # But if we want real resume, we need to load existing.
-        df.to_excel(output_file, index=False)
-        logger.info(f"结果已更新至 {output_file}")
+        try:
+            df.to_excel(output_file, index=False)
+            logger.info(f"结果已更新至 {output_file}")
+        except Exception as e:
+            logger.error(f"保存Excel失败 (可能文件被打开?): {e}")
 
     if processed_files is not None:
         state_file = os.path.join(DATA_DIR, 'processed_files.json')
@@ -59,7 +79,6 @@ def load_state():
         except Exception as e:
             logger.error(f"加载状态失败: {e}")
 
-    # Load existing excel to populate all_dividends
     output_file = os.path.join(OUTPUT_DIR, 'dividends_summary.xlsx')
     if os.path.exists(output_file):
         try:
@@ -76,94 +95,97 @@ def generate_report(stock_list_path):
     if not os.path.exists(stock_list_path):
         return
 
-    stocks_df = pd.read_csv(stock_list_path)
-    stocks_df['code'] = stocks_df['code'].apply(lambda x: str(x).zfill(6))
-    
-    # Load Extraction Results
-    output_file = os.path.join(OUTPUT_DIR, 'dividends_summary.xlsx')
-    extraction_map = {} # code -> {status, amount}
-    if os.path.exists(output_file):
-        res_df = pd.read_excel(output_file)
-        res_df['code'] = res_df['code'].apply(lambda x: str(x).zfill(6))
-        for _, row in res_df.iterrows():
+    try:
+        stocks_df = pd.read_csv(stock_list_path)
+        stocks_df['code'] = stocks_df['code'].apply(lambda x: str(x).zfill(6))
+        
+        output_file = os.path.join(OUTPUT_DIR, 'dividends_summary.xlsx')
+        extraction_map = {} 
+        if os.path.exists(output_file):
+            res_df = pd.read_excel(output_file)
+            res_df['code'] = res_df['code'].apply(lambda x: str(x).zfill(6))
+            for _, row in res_df.iterrows():
+                code = row['code']
+                if code not in extraction_map:
+                    extraction_map[code] = {'has_data': False, 'max_amount': 0}
+                
+                if row['amount'] > 0:
+                    extraction_map[code]['has_data'] = True
+                    extraction_map[code]['max_amount'] = max(extraction_map[code]['max_amount'], row['amount'])
+
+        report_data = []
+        pdf_files_set = set(os.listdir(PDF_DIR))
+        
+        for _, row in stocks_df.iterrows():
             code = row['code']
-            if code not in extraction_map:
-                extraction_map[code] = {'extracted': False, 'has_data': False, 'max_amount': 0}
+            name = row['name']
             
-            extraction_map[code]['extracted'] = True
-            if row['amount'] > 0:
-                extraction_map[code]['has_data'] = True
-                extraction_map[code]['max_amount'] = max(extraction_map[code]['max_amount'], row['amount'])
-
-    # Check Files
-    report_data = []
-    for _, row in stocks_df.iterrows():
-        code = row['code']
-        name = row['name']
-        
-        # Check PDF existence
-        # Filename format: code_name.pdf
-        pdf_exists = False
-        for f in os.listdir(PDF_DIR):
-            if f.startswith(code) and f.endswith('.pdf'):
-                pdf_exists = True
-                break
-        
-        status = 'Unknown'
-        detail = ''
-        
-        if not pdf_exists:
-            status = 'Missing PDF'
-            detail = '未下载到招股书'
-        else:
-            if code in extraction_map:
-                info = extraction_map[code]
-                if info['has_data']:
-                    status = 'Success'
-                    detail = f"提取到分红 (最大 {info['max_amount']} 万元)"
-                else:
-                    status = 'No Data'
-                    detail = '提取结果为0或空'
+            pdf_exists = False
+            for f in pdf_files_set:
+                if f.startswith(code) and f.endswith('.pdf'):
+                    pdf_exists = True
+                    break
+            
+            status = 'Unknown'
+            detail = ''
+            
+            if not pdf_exists:
+                status = 'Missing PDF'
+                detail = '未下载到招股书'
             else:
-                status = 'Pending'
-                detail = '已下载但尚未解析'
+                if code in extraction_map:
+                    info = extraction_map[code]
+                    if info['has_data']:
+                        status = 'Success'
+                        detail = f"提取到分红 (最大 {info['max_amount']} 万元)"
+                    else:
+                        status = 'No Data'
+                        detail = '提取结果为0或空'
+                else:
+                    status = 'Pending'
+                    detail = '已下载但尚未解析'
 
-        report_data.append({
-            'code': code,
-            'name': name,
-            'status': status,
-            'detail': detail
-        })
-        
-    report_df = pd.DataFrame(report_data)
-    report_path = os.path.join(OUTPUT_DIR, 'status_report.csv')
-    report_df.to_csv(report_path, index=False, encoding='utf-8-sig')
-    logger.info(f"状态报告已保存至 {report_path}")
+            report_data.append({
+                'code': code,
+                'name': name,
+                'status': status,
+                'detail': detail
+            })
+            
+        report_df = pd.DataFrame(report_data)
+        report_path = os.path.join(OUTPUT_DIR, 'status_report.csv')
+        report_df.to_csv(report_path, index=False, encoding='utf-8-sig')
+        logger.info(f"状态报告已保存至 {report_path}")
+    except Exception as e:
+        logger.error(f"生成报告失败: {e}")
 
 def process_file(pdf_file, extractor, all_dividends):
-    stock_code = pdf_file.split('_')[0]
-    stock_name = pdf_file.split('_')[1].replace('.pdf', '') if '_' in pdf_file else 'Unknown'
-    pdf_path = os.path.join(PDF_DIR, pdf_file)
-    
-    logger.info(f"正在解析: {pdf_file}")
-    dividends = extractor.extract(pdf_path)
-    
-    if dividends:
-        for div in dividends:
-            div['code'] = stock_code
-            div['name'] = stock_name
-            div['source_file'] = pdf_file
-            all_dividends.append(div)
-    else:
-        all_dividends.append({
-            'code': stock_code,
-            'name': stock_name,
-            'year': 'N/A',
-            'amount': 0,
-            'page': 'N/A',
-            'source_file': pdf_file,
-            'note': '未提取到数据'
-        })
+    try:
+        stock_code = pdf_file.split('_')[0]
+        stock_name = pdf_file.split('_')[1].replace('.pdf', '') if '_' in pdf_file else 'Unknown'
+        pdf_path = os.path.join(PDF_DIR, pdf_file)
+        
+        logger.info(f"正在解析: {pdf_file}")
+        dividends = extractor.extract(pdf_path)
+        
+        if dividends:
+            for div in dividends:
+                div['code'] = stock_code
+                div['name'] = stock_name
+                div['source_file'] = pdf_file
+                all_dividends.append(div)
+        else:
+            all_dividends.append({
+                'code': stock_code,
+                'name': stock_name,
+                'year': 'N/A',
+                'amount': 0,
+                'page': 'N/A',
+                'source_file': pdf_file,
+                'note': '未提取到数据'
+            })
+    except Exception as e:
+        logger.error(f"处理文件失败 {pdf_file}: {e}")
     return True
 
 def run_pipeline(action='all', limit=None, csv_file='stock_list.csv', parallel=False):
@@ -173,10 +195,8 @@ def run_pipeline(action='all', limit=None, csv_file='stock_list.csv', parallel=F
         logger.error("股票列表不存在，请先运行 src/get_stock_list.py")
         return
 
-    # Load State for Resume
     processed_files, all_dividends = load_state()
 
-    # Parallel Mode
     if parallel and action == 'all':
         logger.info("=== 启动并行模式 (一边下载一边解析) ===")
         
@@ -228,6 +248,10 @@ def run_pipeline(action='all', limit=None, csv_file='stock_list.csv', parallel=F
             save_results(all_dividends, processed_files)
             generate_report(stock_list_path)
             return
+        except Exception as e:
+            logger.critical(f"主循环发生未捕获异常: {e}")
+            save_results(all_dividends, processed_files)
+            raise
 
         return
 
@@ -242,7 +266,6 @@ def run_pipeline(action='all', limit=None, csv_file='stock_list.csv', parallel=F
         extractor = ProspectusExtractor()
         
         pdf_files = [f for f in os.listdir(PDF_DIR) if f.endswith('.pdf')]
-        # Filter already processed
         pdf_files = [f for f in pdf_files if f not in processed_files]
         
         if limit:
