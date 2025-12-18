@@ -98,16 +98,22 @@ class Downloader:
             response = self.session.get(url, stream=True, timeout=30)
             response.raise_for_status()
             
-            with open(filepath, 'wb') as f:
+            temp_filepath = filepath + '.tmp'
+            with open(temp_filepath, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     if chunk:
                         f.write(chunk)
+            
+            # Atomic rename
+            os.replace(temp_filepath, filepath)
             logger.info(f"下载成功: {filepath}")
             return True
         except Exception as e:
             logger.error(f"下载失败 ({url}): {e}")
             if os.path.exists(filepath):
                 os.remove(filepath)
+            if os.path.exists(filepath + '.tmp'):
+                os.remove(filepath + '.tmp')
             return False
 
     def run(self, stock_list_path=None):

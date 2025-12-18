@@ -1,39 +1,47 @@
 @echo off
-chcp 65001 >nul
+chcp 65001 > nul
 echo ========================================================
-echo       A股招股书分红数据自动化提取工具 - 一键运行
+echo A股招股说明书现金分红一键抓取工具 (并行加速版)
+echo A-Share IPO Prospectus Dividend Extractor (Parallel Mode)
 echo ========================================================
+echo.
+echo 本脚本将自动执行以下步骤：
+echo 1. 生成或更新股票列表 (Stock List)
+echo 2. 并行下载招股说明书 PDF 并同时进行解析 (Download & Extract)
+echo 3. 支持断点续传：自动跳过已下载和已解析的文件
+echo 4. 生成最终状态报告 (Status Report)
+echo.
 
-echo [1/3] 正在检查并安装依赖...
-python -m pip install -r requirements.txt
-if %errorlevel% neq 0 (
-    echo 依赖安装失败，请检查网络或 Python 环境。
-    pause
-    exit /b
+if not exist venv (
+    echo [INFO] 正在创建虚拟环境 (Creating virtual environment)...
+    python -m venv venv
+)
+
+echo [INFO] 正在激活虚拟环境 (Activating virtual environment)...
+call venv\Scripts\activate
+
+echo [INFO] 正在安装/更新依赖 (Installing dependencies)...
+pip install -r requirements.txt -q
+
+if not exist data (
+    mkdir data
+)
+
+if not exist data\stock_list.csv (
+    echo [INFO] 正在获取股票列表 (Fetching stock list)...
+    python src/get_stock_list.py
 )
 
 echo.
-echo [2/3] 正在获取 A 股上市公司列表 (2019-2023)...
-python src/get_stock_list.py
-if %errorlevel% neq 0 (
-    echo 获取列表失败。
-    pause
-    exit /b
-)
-
-echo.
-echo [3/3] 开始下载招股书并提取分红数据...
-echo 注意：此过程可能耗时较长，因为需要下载大量 PDF 文件。
-echo 日志文件位于 logs/pipeline.log
-echo.
-echo 如果您只想运行测试（只处理前 3 个），请按 Ctrl+C 终止，然后运行: python src/main.py --limit 3
+echo [INFO] 正在启动并行采集流程... (Starting Pipeline)
+echo [INFO] 提示：您可以随时按 Ctrl+C 停止脚本，进度会自动保存。
+echo [INFO] Tip: You can press Ctrl+C to stop anytime. Progress is saved.
 echo.
 
-python src/main.py --action all
+python src/main.py --action all --parallel
 
 echo.
-echo ========================================================
-echo                   任务完成！
-echo 结果已保存至: data/output/dividends_summary.xlsx
-echo ========================================================
+echo [INFO] 任务完成！(Done!)
+echo [INFO] 结果文件 (Results): data/output/dividends_summary.xlsx
+echo [INFO] 状态报告 (Report):  data/output/status_report.csv
 pause
