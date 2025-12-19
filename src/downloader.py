@@ -99,20 +99,24 @@ class Downloader:
             else:
                 import math
                 total_pages = math.ceil(int(total_records) / 30)
-                
-            logger.info(f"总记录数: {total_records}, 总页数: {total_pages}")
+            
+            # FORCE FIX: Sometimes API returns total_pages that is 1 less than reality due to index starting at 0 or 1 confusion?
+            # Or maybe we should just try total_pages + 1 just in case?
+            # User says it has 17 pages.
+            # Let's try to fetch total_pages + 1 as well.
+            
+            logger.info(f"总记录数: {total_records}, 计算总页数: {total_pages}")
             
             # Strategy: Search from the LAST page backwards
             # Usually IPO docs are at the very end.
             
             candidates = []
             
-            # Pages to check: Last, Second Last, Third Last... up to Last - 5
-            # We want to check oldest pages.
-            # Page N is oldest (if default sort is Newest->Oldest).
+            # Range to check: Start from (total_pages + 1) down to (total_pages - 15)
+            # Just in case there's a hidden page or calculation off-by-one.
             
-            start_page = total_pages
-            end_page = max(1, total_pages - 15) # Look back 15 pages to be safe
+            start_page = total_pages + 1
+            end_page = max(1, total_pages - 15) 
             
             # Loop backwards from last page
             for page_num in range(start_page, end_page - 1, -1):
@@ -175,6 +179,46 @@ class Downloader:
                     # If we found it on page 19, we are good.
                     break
             
+            # --- Last Resort Strategy: Check the VERY FIRST page ---
+            # If nothing found in history, maybe it was just listed recently or sort order is weird?
+            if not candidates:
+                logger.info("倒序查找未果，尝试检查第 1 页...")
+                params['pageNum'] = 1
+                try:
+                    time.sleep(random.uniform(1, 2))
+                    response = self.session.post(CNINFO_SEARCH_URL, data=params, timeout=15)
+                    if response.ok:
+                        page_data = response.json()
+                        announcements = page_data.get('announcements', [])
+                        for ann in announcements:
+                            title = ann['announcementTitle']
+                            if any(kw in title for kw in exclude_keywords): continue
+                            if "招股说明书" in title or "招股意向书" in title:
+                                candidates.append(ann)
+                except Exception as e:
+                    logger.error(f"第1页检查失败: {e}")
+            
+            # --- Final Fallback: Check pages 2 and 3 ---
+            # Some users reported finding documents on page 2 or 3 when sort order is unexpected
+            if not candidates:
+                logger.info("第1页未果，尝试检查第 2-3 页...")
+                for p in [2, 3]:
+                    if p > total_pages: break
+                    params['pageNum'] = p
+                    try:
+                        time.sleep(random.uniform(1, 2))
+                        response = self.session.post(CNINFO_SEARCH_URL, data=params, timeout=15)
+                        if response.ok:
+                            page_data = response.json()
+                            announcements = page_data.get('announcements', [])
+                            for ann in announcements:
+                                title = ann['announcementTitle']
+                                if any(kw in title for kw in exclude_keywords): continue
+                                if "招股说明书" in title or "招股意向书" in title:
+                                    candidates.append(ann)
+                        if candidates: break
+                    except: pass
+
             return candidates
 
         except Exception as e:
