@@ -8,7 +8,7 @@ import threading
 import queue
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed, wait, FIRST_COMPLETED
 from typing import Dict, List, Any, Optional
 from src.downloader import Downloader
 from src.extractor import ProspectusExtractor, process_pdf_worker
@@ -149,34 +149,41 @@ class TaskManager:
         with ProcessPoolExecutor(max_workers=self.status["concurrency"]) as executor:
             from functools import partial
             # Prepare tasks
-            futures = []
-            for f in pdf_files:
-                if self.stop_event.is_set(): break
-                futures.append(executor.submit(process_pdf_worker, f, PDF_DIR))
+            futures = {executor.submit(process_pdf_worker, f, PDF_DIR): f for f in pdf_files}
             
-            for future in futures:
-                if self.stop_event.is_set():
-                    executor.shutdown(wait=False, cancel_futures=True)
-                    break
-                try:
-                    pdf_file, dividends, error = future.result()
-                    if error:
-                        logging.error(f"Error processing {pdf_file}: {error}")
-                        self.status["failed_tasks"] += 1
-                    else:
-                        if dividends:
-                            all_dividends.extend(dividends)
-                        self.status["completed_tasks"] += 1
-                    
-                    processed_files.add(pdf_file)
-                    
-                    # Periodic save
-                    if self.status["completed_tasks"] % 10 == 0:
-                        save_results(all_dividends, processed_files)
+            while futures and not self.stop_event.is_set():
+                # Wait for at least one future to complete or timeout to check stop_event
+                done, not_done = wait(futures.keys(), timeout=0.5, return_when=FIRST_COMPLETED)
+                
+                for future in done:
+                    try:
+                        pdf_file, dividends, error = future.result()
+                        if error:
+                            logging.error(f"Error processing {pdf_file}: {error}")
+                            self.status["failed_tasks"] += 1
+                        else:
+                            if dividends:
+                                all_dividends.extend(dividends)
+                            self.status["completed_tasks"] += 1
                         
-                except Exception as e:
-                    logging.error(f"Future result error: {e}")
-                    self.status["failed_tasks"] += 1
+                        processed_files.add(pdf_file)
+                        
+                        # Periodic save
+                        if self.status["completed_tasks"] % 10 == 0:
+                            save_results(all_dividends, processed_files)
+                            
+                    except Exception as e:
+                        logging.error(f"Future result error: {e}")
+                        self.status["failed_tasks"] += 1
+                    
+                    # Remove processed future from the dictionary
+                    del futures[future]
+
+            # If stopped, cancel remaining
+            if self.stop_event.is_set():
+                for f in futures:
+                    f.cancel()
+                logging.info("Task execution cancelled.")
 
         save_results(all_dividends, processed_files)
         generate_report(os.path.join(DATA_DIR, 'stock_list.csv'))
