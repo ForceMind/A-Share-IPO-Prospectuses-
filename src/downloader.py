@@ -52,46 +52,60 @@ class Downloader:
         """
         搜索招股说明书
         """
+        # Common params initialization
         params = {
             'pageNum': 1,
             'pageSize': 30,
-            'column': 'szse', # 默认深市，但通常不影响搜索结果，或者需要根据代码判断
+            'column': 'szse', 
             'tabName': 'fulltext',
             'plate': '',
             'stock': f'{code},{org_id}',
-            'searchkey': '招股说明书', # 显式搜索关键词
+            'searchkey': '招股说明书',
             'secid': '',
-            'category': 'category_30_0202;category_30_0102', # IPO Prospectus, Listing Announcement
+            'category': 'category_30_0202;category_30_0102', 
             'trade': '',
-            'seDate': '', # 可以指定时间范围 '2019-01-01~2023-12-31'
+            'seDate': '', 
             'sortName': '',
             'sortType': '',
             'isHLtitle': 'true'
         }
         
-        # 简单的代码判断板块
         if code.startswith('6'):
             params['column'] = 'sse'
-        elif code.startswith('8') or code.startswith('4'): # 北交所
+        elif code.startswith('8') or code.startswith('4'):
             params['column'] = 'bse'
         
         try:
             time.sleep(random.uniform(1, 3))
             
-            # Strategy 1: Search by Code
-            logger.info(f"搜索尝试 1 (代码): {code}")
+            # --- Strategy 1: Standard Search (Stock + Category + Keyword) ---
+            # NOTE: Analysis shows some docs are NOT indexed with "招股说明书" keyword properly in the search engine,
+            # even if the title contains it! (e.g. 603171, 300929).
+            # They ARE found when searching by DATE range or broad browsing.
+            
+            logger.info(f"搜索尝试 1 (标准): {code}")
             response = self.session.post(CNINFO_SEARCH_URL, data=params, timeout=15)
             response.raise_for_status()
             data = response.json()
             
-            announcements = []
-            if data.get('announcements'):
-                announcements = data['announcements']
+            announcements = data.get('announcements', [])
+            if announcements is None: announcements = []
             
-            # Strategy 2: Search by Name (if code fails)
+            # --- Strategy 2: Relaxed Category (Stock + Keyword Only) ---
+            if not announcements:
+                logger.info(f"搜索尝试 2 (放宽分类): {code}")
+                params['category'] = '' # Remove category constraint
+                time.sleep(random.uniform(1, 3))
+                response = self.session.post(CNINFO_SEARCH_URL, data=params, timeout=15)
+                response.raise_for_status()
+                data = response.json()
+                announcements = data.get('announcements', [])
+                if announcements is None: announcements = []
+
+            # --- Strategy 3: Name Search (Name + Keyword) ---
             if not announcements and name:
-                logger.info(f"按代码搜索失败，尝试按名称搜索: {name}")
-                params['stock'] = ''
+                logger.info(f"搜索尝试 3 (按名称): {name}")
+                params['stock'] = '' # Remove stock code constraint
                 clean_name = name.replace('ST', '').replace('*', '').strip()
                 params['searchkey'] = f'{clean_name} 招股说明书'
                 
@@ -99,25 +113,48 @@ class Downloader:
                 response = self.session.post(CNINFO_SEARCH_URL, data=params, timeout=15)
                 response.raise_for_status()
                 data = response.json()
-                if data.get('announcements'):
-                    announcements = data['announcements']
+                announcements = data.get('announcements', [])
+                if announcements is None: announcements = []
 
-            # Strategy 3: Search by "首次公开发行" (if name fails)
+            # --- Strategy 4: "Public Offering" Keyword (Name + '公开发行') ---
             if not announcements and name:
-                logger.info(f"按名称搜索失败，尝试关键词 '首次公开发行': {name}")
+                logger.info(f"搜索尝试 4 (公开发行): {name}")
                 params['stock'] = ''
                 clean_name = name.replace('ST', '').replace('*', '').strip()
-                params['searchkey'] = f'{clean_name} 首次公开发行'
+                params['searchkey'] = f'{clean_name} 公开发行'
                 
                 time.sleep(random.uniform(1, 3))
                 response = self.session.post(CNINFO_SEARCH_URL, data=params, timeout=15)
                 response.raise_for_status()
                 data = response.json()
-                if data.get('announcements'):
-                    announcements = data['announcements']
+                announcements = data.get('announcements', [])
+                if announcements is None: announcements = []
 
+            # --- Strategy 5: Sort by Pub Date ASC for Code (Oldest first often has IPO docs) ---
+            # KEY FIX: The previous failure analysis showed that searching by keyword FAILED even if title matched.
+            # But searching by DATE worked. Since we don't know the date, we MUST rely on sorting by date (oldest first)
+            # and paging through enough results, OR searching without keywords but filtered by specific categories if possible.
+            # BUT: 603171 had ColumnId: 250401||251302||251306||2516||2705
+            # 300929 had ColumnId: 09020202||160201||160203||250301||251302||251306||2516||2705
+            # Common Category: 251302 (IPO?), 251306, 2516, 2705
+            # 'category_30_0202' used in Strategy 1 might be wrong or outdated?
+            
             if not announcements:
-                return []
+                logger.info(f"搜索尝试 5 (按日期正序 - 关键策略): {code}")
+                # Reset critical params
+                params['stock'] = f'{code},{org_id}'
+                params['searchkey'] = '' # Clear keyword to find ANYTHING because keyword search is BROKEN for these
+                params['category'] = '' # Clear category to find ANYTHING
+                params['sortName'] = 'pubdate'
+                params['sortType'] = 'asc' # Oldest first
+                params['pageSize'] = 50 # Increase page size to catch early docs
+                
+                time.sleep(random.uniform(1, 3))
+                response = self.session.post(CNINFO_SEARCH_URL, data=params, timeout=15)
+                response.raise_for_status()
+                data = response.json()
+                announcements = data.get('announcements', [])
+                if announcements is None: announcements = []
 
             # Filter logic
             exclude_keywords = ["摘要", "更正", "提示", "发行结果", "网上路演", "意见", "法律", "反馈", 
@@ -133,7 +170,87 @@ class Downloader:
                 # Accept both 招股说明书 and 招股意向书
                 if "招股说明书" in title or "招股意向书" in title:
                     candidates.append(ann)
+
+            if candidates:
+                return candidates
+
+            # --- Strategy 6: Final Resort - Search for "Listing Announcement" which might reveal prospectus in same context or be acceptable fallback if prospectus is truly missing in this index ---
+            if not candidates and name:
+                 logger.info(f"搜索尝试 6 (上市公告书 - 间接查找): {name}")
+                 params['stock'] = '' # No code
+                 clean_name = name.replace('ST', '').replace('*', '').strip()
+                 params['searchkey'] = f'{clean_name} 上市公告书'
+                 params['category'] = ''
+                 params['sortName'] = ''
+                 params['sortType'] = ''
+                 
+                 time.sleep(random.uniform(1, 3))
+                 response = self.session.post(CNINFO_SEARCH_URL, data=params, timeout=15)
+                 response.raise_for_status()
+                 data = response.json()
+                 announcements = data.get('announcements', [])
+                 
+                 # Check if announcements is None
+                 if announcements is None: announcements = []
+                 
+                 for ann in announcements:
+                    title = ann['announcementTitle']
+                    if any(kw in title for kw in exclude_keywords): continue
+                    
+                    # If we find the Listing Announcement, sometimes the Prospectus is listed nearby or with similar title
+                    # But here we strictly look for "招股"
+                    if "招股说明书" in title or "招股意向书" in title:
+                        candidates.append(ann)
             
+            # --- Strategy 7: Super Broad - Name + "公开发行" with NO category, NO sort ---
+            if not candidates and name:
+                 logger.info(f"搜索尝试 7 (超级宽泛 - 公开发行): {name}")
+                 params['stock'] = ''
+                 clean_name = name.replace('ST', '').replace('*', '').strip()
+                 params['searchkey'] = f'{clean_name} 公开发行'
+                 params['category'] = ''
+                 params['pageSize'] = 50 
+                 
+                 time.sleep(random.uniform(1, 3))
+                 response = self.session.post(CNINFO_SEARCH_URL, data=params, timeout=15)
+                 response.raise_for_status()
+                 data = response.json()
+                 announcements = data.get('announcements', [])
+                 if announcements is None: announcements = []
+
+                 for ann in announcements:
+                    title = ann['announcementTitle']
+                    if any(kw in title for kw in exclude_keywords): continue
+                    
+                    if "招股说明书" in title or "招股意向书" in title:
+                        candidates.append(ann)
+            
+            # --- Strategy 8: Super Broad - Name only + NO category ---
+            # This is risky and returns many results, but we filter client side
+            if not candidates and name:
+                 logger.info(f"搜索尝试 8 (终极尝试 - 仅按名称): {name}")
+                 params['stock'] = ''
+                 clean_name = name.replace('ST', '').replace('*', '').strip()
+                 params['searchkey'] = clean_name
+                 params['category'] = ''
+                 params['pageSize'] = 100 # Maximum usually allowed
+                 params['sortName'] = 'pubdate'
+                 params['sortType'] = 'asc' # Try oldest first again with just name
+                 
+                 time.sleep(random.uniform(1, 3))
+                 response = self.session.post(CNINFO_SEARCH_URL, data=params, timeout=15)
+                 response.raise_for_status()
+                 data = response.json()
+                 announcements = data.get('announcements', [])
+                 if announcements is None: announcements = []
+
+                 for ann in announcements:
+                    title = ann['announcementTitle']
+                    if any(kw in title for kw in exclude_keywords): continue
+                    
+                    if "招股说明书" in title or "招股意向书" in title:
+                        candidates.append(ann)
+
             return candidates
 
         except Exception as e:
