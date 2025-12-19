@@ -137,7 +137,7 @@ class TaskManager:
 
     def set_concurrency(self, value: int):
         with self._lock:
-            self.status["concurrency"] = max(1, min(value, 32))
+            self.status["concurrency"] = max(1, min(value, 100))
             # Note: We don't dynamically resize the active executor easily in standard concurrent.futures
             # but we can use this for the next batch or next start.
             logging.info(f"Concurrency set to {self.status['concurrency']}")
