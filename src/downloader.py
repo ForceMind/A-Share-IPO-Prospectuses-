@@ -4,7 +4,10 @@ import random
 import requests
 import logging
 import pandas as pd
-from config import USER_AGENTS, CNINFO_SEARCH_URL, CNINFO_BASE_URL, PDF_DIR, DATA_DIR
+try:
+    from src.config import USER_AGENTS, CNINFO_SEARCH_URL, CNINFO_BASE_URL, PDF_DIR, DATA_DIR
+except ImportError:
+    from config import USER_AGENTS, CNINFO_SEARCH_URL, CNINFO_BASE_URL, PDF_DIR, DATA_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -194,22 +197,42 @@ class Downloader:
             candidates = []
             for ann in announcements:
                 title = ann['announcementTitle']
-                # Basic filter
-                if "摘要" in title or "更正" in title or "提示" in title or "发行结果" in title or "网上路演" in title:
+                # Basic filter - STRICTLY exclude unwanted types
+                if any(kw in title for kw in ["摘要", "更正", "提示", "发行结果", "网上路演", "意见", "法律", "反馈"]):
                     continue
                 
-                if "招股说明书" in title:
+                # Accept both 招股说明书 and 招股意向书
+                if "招股说明书" in title or "招股意向书" in title:
                     candidates.append(ann)
             
-            # If candidates found, pick the one with '注册稿' or just the first one (latest)
+            # If candidates found, pick the best one
             if candidates:
-                # Prefer '注册稿'
-                for c in candidates:
-                    if '注册稿' in c['announcementTitle']:
-                        target_announcement = c
-                        break
-                if not target_announcement:
-                    target_announcement = candidates[0]
+                # Scoring strategy:
+                # 1. Prefer '注册稿' or '封卷稿' (Final versions)
+                # 2. Prefer exact '招股说明书' without '申报稿'
+                # 3. Avoid '申报稿' if possible
+                
+                def get_score(ann_item):
+                    t = ann_item['announcementTitle']
+                    score = 0
+                    if '注册稿' in t: score += 100
+                    if '封卷稿' in t: score += 90
+                    # If it has neither "申报稿" nor "注册稿", it might be the final released version (often just "XX股份有限公司首次公开发行股票招股说明书")
+                    if '申报稿' not in t and '注册稿' not in t: score += 50
+                    
+                    if '申报稿' in t: score -= 10
+                    return score
+
+                # Sort by score desc, then by time desc (usually implied by order, but let's trust API order or existing list)
+                # API returns latest first usually?
+                candidates.sort(key=get_score, reverse=True)
+                target_announcement = candidates[0]
+                
+                # Log the selection if there were multiple options
+                if len(candidates) > 1:
+                     titles = [c['announcementTitle'] for c in candidates[:3]]
+                     logger.info(f"多份招股书候选项，已选择: {target_announcement['announcementTitle']}. (候选项: {titles})")
+
             
             if not target_announcement:
                 logger.warning(f"未找到符合条件的招股书文件: {code}. 可用标题: {all_titles[:3]}...")

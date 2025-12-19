@@ -75,21 +75,24 @@ class TaskManager:
                     self.log_queue.put(formatted)
                     
                     # 2. Re-emit to Root Logger (File/Console)
-                    # We need to be careful not to cause an infinite loop if the root logger
-                    # has a QueueHandler attached that feeds back into mp_log_queue.
-                    # In our setup, main process's root logger has FileHandler + StreamHandler + WebQueueHandler.
-                    # WebQueueHandler feeds self.log_queue (not self.mp_log_queue), so it's safe.
+                    # Skip if the source logger is root (to avoid potential recursive loops if configured wrong, 
+                    # though our main process root logger feeds self.log_queue not self.mp_log_queue)
                     
-                    # However, we must ensure we don't re-log something that came from ourselves if we were
-                    # somehow listening to self.log_queue. Here we are reading from self.mp_log_queue (multiprocessing).
+                    # Fix: Ensure we don't double log if the handler is already attached to root in main process?
+                    # The main process root logger has StreamHandler/FileHandler.
+                    # We want these handlers to see the worker's log.
                     
-                    # Create a LogRecord if needed, or just log.
-                    # Ideally we use handle() to pass the record directly, but we need to ensure handlers handle it.
-                    # record.name is likely 'root' or 'src.extractor'.
-                    
-                    # We'll use callHandlers to skip filters if we want, or just handle.
                     if root_logger.isEnabledFor(record.levelno):
-                         root_logger.handle(record)
+                         # Record came from a worker process, so we treat it as a new record here
+                         # but we must preserve its metadata (level, msg, time)
+                         # Simple way: use handle(), but that might bypass filters if we aren't careful.
+                         # Better way: log it as if it was local, but keeping the message.
+                         
+                         # Since we already formatted it for WebUI, for Console/File we might want standard format
+                         # But since record is a LogRecord, we can just pass it to handlers
+                         for h in root_logger.handlers:
+                             # Don't send back to QueueHandler if it feeds the same queue (it doesn't, it feeds log_queue)
+                             h.handle(record)
 
                 else:
                     # Raw string
@@ -213,6 +216,9 @@ class TaskManager:
         logging.info(f"Starting extraction for {len(pdf_files)} files with concurrency {self.status['concurrency']}")
         
         # Use ProcessPoolExecutor for CPU-bound extraction
+        # Must use Manager Queue for logging in multiprocessing
+        # Note: self.mp_log_queue is already a Manager Queue created in __init__
+        
         with ProcessPoolExecutor(max_workers=self.status["concurrency"]) as executor:
             from functools import partial
             # Prepare tasks
@@ -220,10 +226,15 @@ class TaskManager:
             futures = {executor.submit(process_pdf_worker, f, PDF_DIR, self.mp_log_queue): f for f in pdf_files}
             
             while futures and not self.stop_event.is_set():
+                # Check log queue while waiting
+                # We need to drain the logs proactively if the listener thread isn't fast enough
+                # OR just rely on listener thread. The listener thread is independent.
+                
                 # Wait for at least one future to complete or timeout to check stop_event
                 done, not_done = wait(futures.keys(), timeout=0.5, return_when=FIRST_COMPLETED)
                 
                 for future in done:
+
                     try:
                         pdf_file, dividends, error = future.result()
                         if error:
