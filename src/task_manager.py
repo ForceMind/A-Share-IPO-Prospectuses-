@@ -35,6 +35,7 @@ class TaskManager:
         # Multiprocessing Queue (Process-safe)
         self.manager = multiprocessing.Manager()
         self.mp_log_queue = self.manager.Queue()
+        self.mp_stop_event = self.manager.Event()
         
         self.executor = None
         self.stop_event = threading.Event()
@@ -83,15 +84,10 @@ class TaskManager:
                     # We want these handlers to see the worker's log.
                     
                     if root_logger.isEnabledFor(record.levelno):
-                         # Record came from a worker process, so we treat it as a new record here
-                         # but we must preserve its metadata (level, msg, time)
-                         # Simple way: use handle(), but that might bypass filters if we aren't careful.
-                         # Better way: log it as if it was local, but keeping the message.
-                         
-                         # Since we already formatted it for WebUI, for Console/File we might want standard format
-                         # But since record is a LogRecord, we can just pass it to handlers
                          for h in root_logger.handlers:
-                             # Don't send back to QueueHandler if it feeds the same queue (it doesn't, it feeds log_queue)
+                             # Prevent duplicating logs to the Web UI (QueueHandler)
+                             if h.__class__.__name__ == 'QueueHandler':
+                                 continue
                              h.handle(record)
 
                 else:
@@ -152,6 +148,7 @@ class TaskManager:
             return
         
         self.stop_event.clear()
+        self.mp_stop_event.clear()
         self.status["is_running"] = True
         self.status["current_action"] = action
         self.status["start_time"] = time.time()
@@ -162,6 +159,7 @@ class TaskManager:
 
     def stop_tasks(self):
         self.stop_event.set()
+        self.mp_stop_event.set()
         self.status["is_running"] = False
         self.status["current_action"] = "Stopping..."
         logging.info("Stopping tasks...")
@@ -267,7 +265,7 @@ class TaskManager:
             # Spawn processes
             with ProcessPoolExecutor(max_workers=concurrency) as executor:
                 futures = {
-                    executor.submit(_worker_download_chunk, chunk, self.mp_log_queue): i 
+                    executor.submit(_worker_download_chunk, chunk, self.mp_log_queue, self.mp_stop_event): i 
                     for i, chunk in enumerate(chunks)
                 }
                 
@@ -302,7 +300,7 @@ class TaskManager:
             logging.error(f"Download phase error: {e}")
             raise
 
-def _worker_download_chunk(stock_list_chunk, log_queue):
+def _worker_download_chunk(stock_list_chunk, log_queue, stop_event=None):
     """
     Worker process for downloading a chunk of stocks.
     """
@@ -334,6 +332,10 @@ def _worker_download_chunk(stock_list_chunk, log_queue):
     failed_count = 0
     
     for code, name in stock_list_chunk:
+        if stop_event and stop_event.is_set():
+            logger.info(f"Download Worker [PID:{os.getpid()}] stopping...")
+            break
+
         # We can't easily check the parent's stop_event here without passing a Manager Event.
         # But if the main process terminates the pool, this might stop? 
         # Actually standard Pool waits. 

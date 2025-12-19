@@ -102,6 +102,20 @@ class Downloader:
                 if data.get('announcements'):
                     announcements = data['announcements']
 
+            # Strategy 3: Search by "首次公开发行" (if name fails)
+            if not announcements and name:
+                logger.info(f"按名称搜索失败，尝试关键词 '首次公开发行': {name}")
+                params['stock'] = ''
+                clean_name = name.replace('ST', '').replace('*', '').strip()
+                params['searchkey'] = f'{clean_name} 首次公开发行'
+                
+                time.sleep(random.uniform(1, 3))
+                response = self.session.post(CNINFO_SEARCH_URL, data=params, timeout=15)
+                response.raise_for_status()
+                data = response.json()
+                if data.get('announcements'):
+                    announcements = data['announcements']
+
             if not announcements:
                 return []
 
