@@ -320,13 +320,41 @@ class ProspectusExtractor:
 
         return sorted(final_data.values(), key=lambda x: x['year'], reverse=True)
 
-def process_pdf_worker(pdf_file, pdf_dir):
+def process_pdf_worker(pdf_file, pdf_dir, log_queue=None):
     """
     Worker function for multiprocessing.
     Instantiates its own extractor to avoid pickling issues and ensure thread/process safety.
     """
     try:
         import os
+        
+        # Configure logging if log_queue is provided
+        if log_queue:
+            logger = logging.getLogger()
+            # Clear default handlers to avoid duplicates or lost logs
+            # Check if QueueHandler is already attached (though usually it's clean in new process)
+            is_configured = any(h.__class__.__name__ == 'QueueHandler' for h in logger.handlers)
+            if not is_configured:
+                logger.handlers = []
+                
+                # Define simple QueueHandler locally to avoid import issues or dependency
+                class QueueHandler(logging.Handler):
+                    def __init__(self, q):
+                        super().__init__()
+                        self.q = q
+                    def emit(self, record):
+                        try:
+                            self.q.put_nowait(record)
+                        except Exception:
+                            self.handleError(record)
+                            
+                logger.addHandler(QueueHandler(log_queue))
+                logger.setLevel(logging.INFO)
+
+        # Log startup with PID
+        logger = logging.getLogger()
+        logger.info(f"Worker process started [PID: {os.getpid()}] processing: {pdf_file}")
+
         pdf_path = os.path.join(pdf_dir, pdf_file)
         
         # Initialize extractor inside the process

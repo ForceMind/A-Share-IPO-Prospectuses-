@@ -77,6 +77,9 @@ def main():
 
     print_header()
 
+    # Log Process ID for launcher
+    print(f"[INFO] Launcher PID: {os.getpid()}")
+
     # 1. Install Dependencies
     # We assume python is available since this script is running
     pip_cmd = f'"{sys.executable}" -m pip install -r requirements.txt -q'

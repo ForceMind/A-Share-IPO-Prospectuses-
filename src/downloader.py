@@ -145,15 +145,24 @@ class Downloader:
         df = pd.read_csv(stock_list_path)
         logger.info(f"加载了 {len(df)} 个待处理股票")
 
+        # Optimization: Pre-scan directory to avoid os.listdir() in loop
+        # Store just the stock codes (first part of filename) for faster lookup
+        existing_codes = set()
+        if os.path.exists(PDF_DIR):
+            for f in os.listdir(PDF_DIR):
+                if '_' in f:
+                    existing_codes.add(f.split('_')[0])
+        
+        logger.info(f"本地已存在 {len(existing_codes)} 个股票的招股书")
+
         for index, row in df.iterrows():
             code = str(row['code']).zfill(6) # Ensure 6 digits
             name = row['name']
             
-            # Check if already downloaded
-            # 简单的检查：只要该目录下有包含该代码的文件即可
-            existing_files = [f for f in os.listdir(PDF_DIR) if f.startswith(code)]
-            if existing_files:
-                logger.info(f"[{index+1}/{len(df)}] {code} {name} 已存在文件，跳过")
+            # Check if already downloaded using pre-scanned set
+            if code in existing_codes:
+                # logger.info(f"[{index+1}/{len(df)}] {code} {name} 已存在文件，跳过")
+                # Logging 5000 times "skipped" is noisy and slows down the loop
                 continue
 
             logger.info(f"[{index+1}/{len(df)}] 正在处理 {code} {name}...")
@@ -218,6 +227,6 @@ class Downloader:
             self.download_file(download_url, filepath)
 
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - [PID:%(process)d] - %(levelname)s - %(message)s')
     downloader = Downloader()
     downloader.run()

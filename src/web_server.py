@@ -1,3 +1,4 @@
+import logging
 import sys
 import os
 
@@ -11,7 +12,9 @@ from fastapi.templating import Jinja2Templates
 import uvicorn
 import os
 import asyncio
-from src.task_manager import task_manager
+from src.task_manager import get_task_manager
+
+task_manager = get_task_manager()
 
 app = FastAPI(title="IPO Prospectus Dashboard")
 
@@ -58,6 +61,7 @@ async def websocket_logs(websocket: WebSocket):
         print(f"WebSocket error: {e}")
 
 def run_server(host="127.0.0.1", port=8001):
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - [PID:%(process)d] - %(levelname)s - %(message)s')
     uvicorn.run(app, host=host, port=port)
 
 if __name__ == "__main__":

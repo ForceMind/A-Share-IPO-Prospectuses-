@@ -8,6 +8,7 @@ import threading
 import queue
 import logging
 import time
+import multiprocessing
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed, wait, FIRST_COMPLETED
 from typing import Dict, List, Any, Optional
 from src.downloader import Downloader
@@ -28,10 +29,19 @@ class TaskManager:
             "start_time": None,
             "elapsed_time": 0
         }
+        # Web UI Queue (Thread-safe)
         self.log_queue = queue.Queue(maxsize=1000)
+        
+        # Multiprocessing Queue (Process-safe)
+        self.manager = multiprocessing.Manager()
+        self.mp_log_queue = self.manager.Queue()
+        
         self.executor = None
         self.stop_event = threading.Event()
         self._lock = threading.Lock()
+        
+        # Start Log Bridge
+        threading.Thread(target=self._log_listener, daemon=True).start()
         
         # Initialize components
         self.downloader = Downloader()
@@ -40,7 +50,59 @@ class TaskManager:
         # Setup logging handler to capture logs into queue
         self._setup_logging()
 
+    def _log_listener(self):
+        """
+        Continuously reads from the multiprocessing queue and pushes to the thread-safe queue.
+        This bridges the gap between worker processes and the websocket.
+        Also re-emits logs to the root logger to ensure they appear in the file/console.
+        """
+        root_logger = logging.getLogger()
+        
+        while True:
+            try:
+                # Blocking get
+                record = self.mp_log_queue.get()
+                if record is None: # Poison pill
+                    break
+                
+                # If it's a LogRecord object (from QueueHandler)
+                if hasattr(record, 'msg'):
+                    # 1. Push formatted string to Web UI Queue
+                    msg = record.getMessage() 
+                    import datetime
+                    t = datetime.datetime.fromtimestamp(record.created).strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]
+                    formatted = f"{t} - [PID:{record.process}] - {record.levelname} - {msg}"
+                    self.log_queue.put(formatted)
+                    
+                    # 2. Re-emit to Root Logger (File/Console)
+                    # We need to be careful not to cause an infinite loop if the root logger
+                    # has a QueueHandler attached that feeds back into mp_log_queue.
+                    # In our setup, main process's root logger has FileHandler + StreamHandler + WebQueueHandler.
+                    # WebQueueHandler feeds self.log_queue (not self.mp_log_queue), so it's safe.
+                    
+                    # However, we must ensure we don't re-log something that came from ourselves if we were
+                    # somehow listening to self.log_queue. Here we are reading from self.mp_log_queue (multiprocessing).
+                    
+                    # Create a LogRecord if needed, or just log.
+                    # Ideally we use handle() to pass the record directly, but we need to ensure handlers handle it.
+                    # record.name is likely 'root' or 'src.extractor'.
+                    
+                    # We'll use callHandlers to skip filters if we want, or just handle.
+                    if root_logger.isEnabledFor(record.levelno):
+                         root_logger.handle(record)
+
+                else:
+                    # Raw string
+                    self.log_queue.put(str(record))
+                    
+            except Exception as e:
+                print(f"Log bridge error: {e}")
+                time.sleep(1)
+
     def _setup_logging(self):
+        from src.config import LOG_FORMAT
+        
+        # Handler for Main Process -> Web UI (Direct)
         class QueueHandler(logging.Handler):
             def __init__(self, log_queue):
                 super().__init__()
@@ -60,7 +122,7 @@ class TaskManager:
                     self.handleError(record)
 
         handler = QueueHandler(self.log_queue)
-        handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        handler.setFormatter(logging.Formatter(LOG_FORMAT))
         logging.getLogger().addHandler(handler)
 
     def get_logs(self) -> List[str]:
@@ -109,17 +171,22 @@ class TaskManager:
                 self.status["is_running"] = False
                 return
 
+            logging.info(f"Task started: Action={action}, Limit={limit}, Concurrency={self.status['concurrency']}")
+
             # 1. Download if needed
             if action in ["all", "download"] and not self.stop_event.is_set():
                 self.status["current_action"] = "Downloading"
-                logging.info("Starting download phase...")
+                logging.info(f"Step 1/2: Starting download phase [PID:{os.getpid()}] (Action: {action})...")
                 self.downloader.run(stock_list_path)
+                logging.info("Step 1/2: Download phase completed.")
 
             # 2. Extract if needed
             if action in ["all", "extract"] and not self.stop_event.is_set():
+                logging.info(f"Step 2/2: Starting extraction phase [PID:{os.getpid()}] (Action: {action}, Limit: {limit})...")
                 self._run_extraction(limit)
+                logging.info("Step 2/2: Extraction phase completed.")
 
-            logging.info("Pipeline finished.")
+            logging.info("Pipeline finished successfully.")
         except Exception as e:
             logging.error(f"Pipeline error: {e}")
         finally:
@@ -130,7 +197,7 @@ class TaskManager:
         self.status["current_action"] = "Extracting"
         
         # Load processed state
-        from src.main import load_state, save_results, generate_report
+        from src.pipeline_utils import load_state, save_results, generate_report
         processed_files, all_dividends = load_state()
         
         pdf_files = [f for f in os.listdir(PDF_DIR) if f.endswith('.pdf')]
@@ -149,7 +216,8 @@ class TaskManager:
         with ProcessPoolExecutor(max_workers=self.status["concurrency"]) as executor:
             from functools import partial
             # Prepare tasks
-            futures = {executor.submit(process_pdf_worker, f, PDF_DIR): f for f in pdf_files}
+            # Pass mp_log_queue to worker
+            futures = {executor.submit(process_pdf_worker, f, PDF_DIR, self.mp_log_queue): f for f in pdf_files}
             
             while futures and not self.stop_event.is_set():
                 # Wait for at least one future to complete or timeout to check stop_event
@@ -190,4 +258,11 @@ class TaskManager:
         logging.info(f"Extraction completed. Success: {self.status['completed_tasks']}, Failed: {self.status['failed_tasks']}")
 
 # Singleton instance
-task_manager = TaskManager()
+# task_manager = TaskManager()
+_task_manager_instance = None
+
+def get_task_manager():
+    global _task_manager_instance
+    if _task_manager_instance is None:
+        _task_manager_instance = TaskManager()
+    return _task_manager_instance

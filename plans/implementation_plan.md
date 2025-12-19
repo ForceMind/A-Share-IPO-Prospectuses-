@@ -1,75 +1,55 @@
-# A股招股书分红数据自动化提取项目计划
+# Implementation Plan: Multiprocessing Refactor
 
-## 1. 项目目标
-自动化提取 2019-2023 年 A 股上市公司招股说明书中的“上市前三年”分红数据，并汇总为 Excel。
+## 1. Architecture Changes
+The current architecture fails to capture logs from child processes because `logging` handlers are not automatically pickled/shared across process boundaries in Python (especially on Windows). We need a centralized `multiprocessing.Queue` to aggregate logs.
 
-## 2. 技术架构
+### New Flow:
+1. `TaskManager` initializes a `multiprocessing.Manager().Queue()` (let's call it `mp_log_queue`).
+2. `TaskManager` starts a background thread (`LogConsumer`) that:
+   - Reads from `mp_log_queue`.
+   - Pushes messages to the existing `self.log_queue` (used for WebSockets).
+3. Worker processes (Downloader/Extractor) receive `mp_log_queue` as an argument.
+4. Workers configure a `QueueHandler` at startup to send all logs to `mp_log_queue`.
 
-### 2.1 模块划分
-*   **Stock Lister**: 获取目标股票列表。
-*   **Downloader**: 从巨潮资讯网下载 PDF。
-*   **Extractor**: 解析 PDF 提取分红数据。
-*   **Pipeline**: 串联上述步骤，处理流程控制和异常。
+## 2. File Discovery Optimization
+**Current:** `Downloader.run()` calls `os.listdir(PDF_DIR)` inside the loop for every single stock code (5000+ times).
+**Fix:** 
+- Scan `PDF_DIR` *once* at the beginning.
+- Store existing codes in a `set`.
+- Check against the set in the loop.
 
-### 2.2 关键技术点
+## 3. Detailed Steps
 
-#### Step 1: 获取列表
-*   **接口**: 东方财富网 (Eastmoney) 公开 API 或 `AkShare` 库。
-*   **筛选**: 上市日期在 `2019-01-01` 至 `2023-12-31` 之间。
+### Step 1: Create Reproduction Script (Code Mode)
+- Create `reproduce_mp_logging.py` to confirm the fix pattern (MP Queue vs Thread Queue).
 
-#### Step 2: 下载 PDF (Crawler)
-*   **源**: 巨潮资讯网 (www.cninfo.com.cn)。
-*   **搜索逻辑**:
-    *   根据股票代码搜索。
-    *   筛选分类为“IPO”或“招股说明书”。
-    *   优先下载“注册稿”，其次是“申报稿”。
-    *   排除“摘要”、“更正公告”。
-*   **存储**: `./data/pdfs/{stock_code}_{stock_name}.pdf`。
-*   **反爬**: User-Agent 轮换 + 随机延时 (3-8秒)。
+### Step 2: Refactor `src/task_manager.py`
+- Import `multiprocessing`.
+- Initialize `self.manager = multiprocessing.Manager()` and `self.mp_log_queue = self.manager.Queue()`.
+- Add `_log_listener` method to bridge `mp_log_queue` -> `self.log_queue`.
+- Update `_run_extraction` to pass `self.mp_log_queue` to workers.
 
-#### Step 3: PDF 解析 (核心难点)
-*   **库**: `pdfplumber`。
-*   **定位策略 (增强版)**:
-    *   **排除目录**: 跳过前 30 页，或检测并排除包含密集点号 `......` 和页码引用的行。
-    *   **标题特征识别**: 优先寻找符合标题格式的行（如“九、股利分配政策”、“（三）最近三年的分红情况”）。
-    *   **上下文打分机制**: 对包含关键词的页面进行打分：
-        *   **加分项**: 出现“每10股派发”、“含税”、“股东大会决议”、“实施完毕”。
-        *   **减分项**: 出现“风险”、“不确定性”、“......”（目录特征）。
-    *   **章节锚定**: 尝试先定位“财务会计信息”或“募集资金运用”等大章节，限定搜索范围。
-*   **提取策略**:
-    *   **表格优先**: 在定位到的页面及其后一页，尝试 `extract_tables()`。
-        *   *特征匹配*: 表头应包含“年度”、“期间”、“金额”、“分红”等词。
-        *   *数据清洗*: 去除千分位符，识别单位（万元/元），统一转换为万元。
-    *   **文本兜底**: 若无表格，使用 Regex 提取段落中的数据。
-        *   Pattern: `(\d{4})\s*年.*?分红.*?(\d{1,3}(,\d{3})*(\.\d+)?)`。
-*   **异常处理**: 无法提取或提取数据可疑（如金额为0或过大）时，标记为 `MANUAL_CHECK`。
+### Step 3: Refactor `src/extractor.py`
+- Modify `process_pdf_worker` signature: `def process_pdf_worker(pdf_file, pdf_dir, log_queue=None):`.
+- Inside worker:
+  ```python
+  if log_queue:
+      root = logging.getLogger()
+      if not any(isinstance(h, QueueHandler) for h in root.handlers):
+          root.handlers = [] # Clear default stream handlers to avoid double printing/loss
+          root.addHandler(QueueHandler(log_queue))
+          root.setLevel(logging.INFO)
+  ```
 
-#### Step 4: 汇总
-*   使用 `pandas` 将结果汇总。
-*   输出 `dividends_summary.xlsx`。
+### Step 4: Refactor `src/downloader.py`
+- Modify `run` method.
+- Add `existing_codes = set()` logic at start.
+- Optimizing checking loop.
 
-## 3. 文件结构
-```text
-project_root/
-├── data/
-│   ├── pdfs/          # 下载的 PDF 文件
-│   └── output/        # 结果 Excel
-├── logs/              # 运行日志
-├── src/
-│   ├── __init__.py
-│   ├── config.py      # 配置 (User-Agent, 路径等)
-│   ├── get_stock_list.py # 获取列表
-│   ├── downloader.py  # 爬虫
-│   ├── parser.py      # PDF 解析核心
-│   └── main.py        # 主程序
-├── requirements.txt
-└── README.md
-```
+### Step 5: Refactor `src/main.py`
+- Ensure standalone CLI also supports the optimization (optional but recommended).
 
-## 4. 实施步骤 (Todo)
-1.  **环境搭建**: 安装 `requests`, `pdfplumber`, `pandas`, `openpyxl`, `tqdm`.
-2.  **获取列表**: 实现 `get_stock_list.py`，保存为 `stock_list.csv`。
-3.  **下载模块**: 实现 `downloader.py`，支持断点续传（检查本地是否已有文件）。
-4.  **解析模块**: 实现 `parser.py`，重点调试 PDF 表格提取逻辑。
-5.  **整合运行**: 编写 `main.py` 串联流程。
-6.  **测试与优化**: 抽取 5-10 份典型 PDF 进行测试，优化解析准确率。
+## 4. Verification
+- Run `reproduce_mp_logging.py`.
+- Run the full pipeline with a small limit (`limit=10`) via Web UI.
+- Verify "Web interface shows multiple PIDs".

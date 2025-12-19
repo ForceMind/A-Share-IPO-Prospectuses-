@@ -22,6 +22,9 @@ USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0'
 ]
 
+# Logging Format
+LOG_FORMAT = '%(asctime)s - [PID:%(process)d] - %(levelname)s - %(message)s'
+
 # 巨潮资讯网搜索接口
 CNINFO_SEARCH_URL = 'http://www.cninfo.com.cn/new/hisAnnouncement/query'
 CNINFO_BASE_URL = 'http://static.cninfo.com.cn/'
