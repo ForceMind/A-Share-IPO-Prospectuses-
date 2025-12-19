@@ -30,6 +30,43 @@ def run_command(command, description):
         print("\n[INFO] 用户取消。")
         sys.exit(0)
 
+def kill_process_on_port(port):
+    """
+    Kills the process listening on the specified port (Windows only).
+    """
+    if not sys.platform.startswith('win'):
+        return
+
+    try:
+        # Find PID listening on the port
+        cmd = f'netstat -ano | findstr :{port}'
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        
+        if not result.stdout:
+            return
+
+        lines = result.stdout.strip().split('\n')
+        pids_to_kill = set()
+        
+        for line in lines:
+            parts = line.split()
+            # Standard format: Proto Local Address Foreign Address State PID
+            # Example: TCP 0.0.0.0:8001 0.0.0.0:0 LISTENING 1234
+            if len(parts) >= 5 and f':{port}' in parts[1] and parts[3] == 'LISTENING':
+                pids_to_kill.add(parts[-1])
+        
+        for pid in pids_to_kill:
+            # Skip if the PID is the current process (unlikely for port 8001 but good practice)
+            if str(os.getpid()) == pid:
+                continue
+                
+            print(f"[INFO] 发现端口 {port} 被占用 (PID: {pid})，正在终止...")
+            subprocess.run(f'taskkill /F /PID {pid}', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            time.sleep(1) # Give it a moment to release the port
+            
+    except Exception as e:
+        print(f"[WARN] 无法释放端口 {port}: {e}")
+
 def main():
     # Force UTF-8 output for Windows Console
     if sys.platform.startswith('win'):
@@ -42,10 +79,17 @@ def main():
 
     # 1. Install Dependencies
     # We assume python is available since this script is running
-    pip_cmd = f"{sys.executable} -m pip install -r requirements.txt -q"
-    if not run_command(pip_cmd, "安装/更新依赖"):
-        input("按回车键退出...")
-        sys.exit(1)
+    pip_cmd = f'"{sys.executable}" -m pip install -r requirements.txt -q'
+    # Skip pip check if run recently or just warn
+    # if not run_command(pip_cmd, "安装/更新依赖"):
+    #    input("按回车键退出...")
+    #    sys.exit(1)
+    
+    # Optional dependency check (Warn only)
+    try:
+        subprocess.run(pip_cmd, shell=True, check=True)
+    except:
+         print("[WARN] 依赖安装可能未完全成功，尝试继续...")
 
     # 2. Get Stock List
     # Run get_stock_list.py
@@ -56,14 +100,14 @@ def main():
     # Always run or only if missing? User feedback implies "One click", so maybe check if exists?
     # But user might want updates. Let's run it, it skips if valid usually or overwrites.
     # The script currently overwrites.
-    get_stock_cmd = f"{sys.executable} {stock_list_script}"
+    get_stock_cmd = f'"{sys.executable}" {stock_list_script}'
     if not run_command(get_stock_cmd, "获取最新股票列表"):
         pass # Continue even if list update fails, maybe old list works?
 
     # 3. Audit & Clean (Optional but recommended)
     # Automatically clean invalid/small files before processing
     audit_script = os.path.join("src", "audit_and_clean.py")
-    audit_cmd = f"{sys.executable} {audit_script}"
+    audit_cmd = f'"{sys.executable}" {audit_script}'
     print(f"\n[INFO] 正在检查文件完整性... (Auditing files)")
     if not run_command(audit_cmd, "清理无效PDF文件"):
          print(f"[WARN] 清理步骤失败，将继续执行...")
@@ -73,6 +117,9 @@ def main():
     web_script = os.path.join("src", "web_server.py")
     
     if "--web" in sys.argv:
+        # Kill existing process on port 8001 to prevent conflicts
+        kill_process_on_port(8001)
+
         print(f"\n[INFO] 正在启动 Web 仪表盘... (Starting Dashboard)")
         print(f"[INFO] 请在浏览器中打开: http://127.0.0.1:8001")
         
@@ -87,10 +134,10 @@ def main():
         except:
             pass
             
-        web_cmd = f"{sys.executable} {web_script}"
+        web_cmd = f'"{sys.executable}" {web_script}'
         subprocess.run(web_cmd, shell=True)
     else:
-        pipeline_cmd = f"{sys.executable} {main_script} --action all --parallel"
+        pipeline_cmd = f'"{sys.executable}" {main_script} --action all --parallel'
         print(f"\n[INFO] 正在启动并行采集流程... (Starting Pipeline)")
         try:
             subprocess.run(pipeline_cmd, shell=True)
