@@ -222,11 +222,17 @@ class TaskManager:
 
             # 2. Extract if needed
             if action in ["all", "extract"] and not self.stop_event.is_set():
+                self.status["current_action"] = "Extracting"
                 logging.info(f"Step 2/2: Starting extraction phase [PID:{os.getpid()}] (Action: {action}, Limit: {limit})...")
+                
+                # Directly call _run_extraction without hasattr check as we know it exists in the class
                 self._run_extraction(limit)
+                     
                 logging.info("Step 2/2: Extraction phase completed.")
 
             logging.info("Pipeline finished successfully.")
+        except AttributeError as e:
+             logging.error(f"Pipeline attribute error: {e}. Check if methods like _run_extraction are defined.")
         except Exception as e:
             logging.error(f"Pipeline error: {e}")
         finally:
@@ -300,58 +306,10 @@ class TaskManager:
             logging.error(f"Download phase error: {e}")
             raise
 
-def _worker_download_chunk(stock_list_chunk, log_queue, stop_event=None):
-    """
-    Worker process for downloading a chunk of stocks.
-    """
-    import logging
-    import os
-    from src.downloader import Downloader
-    
-    # Setup logging
-    logger = logging.getLogger()
-    if not any(h.__class__.__name__ == 'QueueHandler' for h in logger.handlers):
-        logger.handlers = []
-        # Define QueueHandler locally if needed, or import
-        class QueueHandler(logging.Handler):
-            def __init__(self, q):
-                super().__init__()
-                self.q = q
-            def emit(self, record):
-                try:
-                    self.q.put_nowait(record)
-                except:
-                    self.handleError(record)
-        logger.addHandler(QueueHandler(log_queue))
-        logger.setLevel(logging.INFO)
-    
-    logger.info(f"Download Worker [PID:{os.getpid()}] started with {len(stock_list_chunk)} tasks.")
-    
-    downloader = Downloader()
-    completed_count = 0
-    failed_count = 0
-    
-    for code, name in stock_list_chunk:
-        if stop_event and stop_event.is_set():
-            logger.info(f"Download Worker [PID:{os.getpid()}] stopping...")
-            break
-
-        # We can't easily check the parent's stop_event here without passing a Manager Event.
-        # But if the main process terminates the pool, this might stop? 
-        # Actually standard Pool waits. 
-        # For now, we process until done or killed.
-        try:
-            downloader.process_stock(code, name)
-            completed_count += 1
-        except Exception as e:
-            logger.error(f"Failed to process {code} {name}: {e}")
-            failed_count += 1
-            
-    logger.info(f"Download Worker [PID:{os.getpid()}] finished.")
-    return completed_count, failed_count
-
-
     def _run_extraction(self, limit: Optional[int]):
+        """
+        Executes the extraction phase.
+        """
         self.status["current_action"] = "Extracting"
         
         # Load processed state
@@ -422,6 +380,56 @@ def _worker_download_chunk(stock_list_chunk, log_queue, stop_event=None):
         save_results(all_dividends, processed_files)
         generate_report(os.path.join(DATA_DIR, 'stock_list.csv'))
         logging.info(f"Extraction completed. Success: {self.status['completed_tasks']}, Failed: {self.status['failed_tasks']}")
+
+def _worker_download_chunk(stock_list_chunk, log_queue, stop_event=None):
+    """
+    Worker process for downloading a chunk of stocks.
+    """
+    import logging
+    import os
+    from src.downloader import Downloader
+    
+    # Setup logging
+    logger = logging.getLogger()
+    if not any(h.__class__.__name__ == 'QueueHandler' for h in logger.handlers):
+        logger.handlers = []
+        # Define QueueHandler locally if needed, or import
+        class QueueHandler(logging.Handler):
+            def __init__(self, q):
+                super().__init__()
+                self.q = q
+            def emit(self, record):
+                try:
+                    self.q.put_nowait(record)
+                except:
+                    self.handleError(record)
+        logger.addHandler(QueueHandler(log_queue))
+        logger.setLevel(logging.INFO)
+    
+    logger.info(f"Download Worker [PID:{os.getpid()}] started with {len(stock_list_chunk)} tasks.")
+    
+    downloader = Downloader()
+    completed_count = 0
+    failed_count = 0
+    
+    for code, name in stock_list_chunk:
+        if stop_event and stop_event.is_set():
+            logger.info(f"Download Worker [PID:{os.getpid()}] stopping...")
+            break
+
+        # We can't easily check the parent's stop_event here without passing a Manager Event.
+        # But if the main process terminates the pool, this might stop? 
+        # Actually standard Pool waits. 
+        # For now, we process until done or killed.
+        try:
+            downloader.process_stock(code, name)
+            completed_count += 1
+        except Exception as e:
+            logger.error(f"Failed to process {code} {name}: {e}")
+            failed_count += 1
+            
+    logger.info(f"Download Worker [PID:{os.getpid()}] finished.")
+    return completed_count, failed_count
 
 # Singleton instance
 # task_manager = TaskManager()
