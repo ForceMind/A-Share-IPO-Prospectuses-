@@ -84,11 +84,12 @@ class Downloader:
             response.raise_for_status()
             data = response.json()
             
+            announcements = []
             if data.get('announcements'):
-                return data['announcements']
+                announcements = data['announcements']
             
             # Strategy 2: Search by Name (if code fails)
-            if name:
+            if not announcements and name:
                 logger.info(f"按代码搜索失败，尝试按名称搜索: {name}")
                 params['stock'] = ''
                 clean_name = name.replace('ST', '').replace('*', '').strip()
@@ -99,9 +100,28 @@ class Downloader:
                 response.raise_for_status()
                 data = response.json()
                 if data.get('announcements'):
-                    return data['announcements']
+                    announcements = data['announcements']
 
-            return []
+            if not announcements:
+                return []
+
+            # Filter logic
+            exclude_keywords = ["摘要", "更正", "提示", "发行结果", "网上路演", "意见", "法律", "反馈", 
+                                "H股", "增发", "配股", "可转债", "转换公司债券"]
+            
+            candidates = []
+            for ann in announcements:
+                title = ann['announcementTitle']
+                # Basic filter - STRICTLY exclude unwanted types
+                if any(kw in title for kw in exclude_keywords):
+                    continue
+                
+                # Accept both 招股说明书 and 招股意向书
+                if "招股说明书" in title or "招股意向书" in title:
+                    candidates.append(ann)
+            
+            return candidates
+
         except Exception as e:
             logger.error(f"搜索招股书失败 ({code}): {e}")
             return []
@@ -137,6 +157,68 @@ class Downloader:
                 os.remove(filepath + '.tmp')
             return False
 
+    def process_stock(self, code, name):
+        """
+        处理单个股票：搜索并下载招股书
+        """
+        code = str(code).zfill(6)
+        
+        # Check if already exists (simple check)
+        # Note: This checks strictly for code_name.pdf. 
+        # If name is different in file system, it might re-download.
+        # But for concurrency, we rely on file existence check in download_file too.
+        safe_name = name.replace('*', '').replace(':', '').replace('?', '')
+        filename = f"{code}_{safe_name}.pdf"
+        filepath = os.path.join(PDF_DIR, filename)
+        
+        if os.path.exists(filepath):
+            logger.info(f"{code} {name} 已存在文件，跳过")
+            return
+            
+        logger.info(f"正在处理 {code} {name}...")
+        
+        org_id = self.get_org_id(code)
+        if not org_id:
+            logger.warning(f"无法获取 orgId: {code}")
+            return
+        
+        announcements = self.search_prospectus(code, name, org_id)
+        if not announcements:
+            logger.warning(f"未找到招股书: {code}")
+            return
+        
+        # Selection Strategy
+        target_announcement = None
+        
+        # Scoring strategy:
+        # 1. Prefer '首次' (Initial) -> +200
+        # 2. Prefer '注册稿' or '封卷稿' (Final versions) -> +100
+        # 3. Prefer exact '招股说明书' without '申报稿' -> +50
+        # 4. Avoid '申报稿' if possible -> -10
+        
+        def get_score(ann_item):
+            t = ann_item['announcementTitle']
+            score = 0
+            if '首次' in t: score += 200
+            if '注册稿' in t: score += 100
+            if '封卷稿' in t: score += 90
+            if '申报稿' not in t and '注册稿' not in t: score += 50
+            if '申报稿' in t: score -= 10
+            return score
+
+        announcements.sort(key=get_score, reverse=True)
+        target_announcement = announcements[0]
+        
+        if len(announcements) > 1:
+             titles = [c['announcementTitle'] for c in announcements[:3]]
+             logger.info(f"多份招股书候选项，已选择: {target_announcement['announcementTitle']}. (候选项: {titles})")
+
+        # Construct Download URL
+        adjunct_url = target_announcement['adjunctUrl']
+        download_url = CNINFO_BASE_URL + adjunct_url
+        
+        self.download_file(download_url, filepath)
+
     def run(self, stock_list_path=None):
         if not stock_list_path:
             stock_list_path = os.path.join(DATA_DIR, 'stock_list.csv')
@@ -159,95 +241,14 @@ class Downloader:
         logger.info(f"本地已存在 {len(existing_codes)} 个股票的招股书")
 
         for index, row in df.iterrows():
-            code = str(row['code']).zfill(6) # Ensure 6 digits
+            code = str(row['code']).zfill(6)
             name = row['name']
             
-            # Check if already downloaded using pre-scanned set
             if code in existing_codes:
-                # logger.info(f"[{index+1}/{len(df)}] {code} {name} 已存在文件，跳过")
-                # Logging 5000 times "skipped" is noisy and slows down the loop
                 continue
 
-            logger.info(f"[{index+1}/{len(df)}] 正在处理 {code} {name}...")
-            
-            org_id = self.get_org_id(code)
-            if not org_id:
-                logger.warning(f"无法获取 orgId: {code}")
-                continue
-            
-            announcements = self.search_prospectus(code, name, org_id)
-            if not announcements:
-                logger.warning(f"未找到招股书: {code}")
-                continue
-            
-            # Filter logic: 
-            # 1. Title contains "招股说明书"
-            # 2. Title does NOT contain "摘要", "更正", "提示"
-            # 3. Sort by time (usually API returns sorted, but we pick the best one)
-            
-            target_announcement = None
-            
-            # DEBUG: Print all titles
-            all_titles = [a['announcementTitle'] for a in announcements]
-            logger.info(f"搜索到的公告标题: {all_titles}")
+            self.process_stock(code, name)
 
-            # Priority 1: "招股说明书" (exact or with code) AND NOT "摘要/更正/提示/发行结果/上市公告书"
-            # Priority 2: "上市公告书" if no prospectus found (sometimes they are combined or mislabeled)
-            
-            candidates = []
-            for ann in announcements:
-                title = ann['announcementTitle']
-                # Basic filter - STRICTLY exclude unwanted types
-                if any(kw in title for kw in ["摘要", "更正", "提示", "发行结果", "网上路演", "意见", "法律", "反馈"]):
-                    continue
-                
-                # Accept both 招股说明书 and 招股意向书
-                if "招股说明书" in title or "招股意向书" in title:
-                    candidates.append(ann)
-            
-            # If candidates found, pick the best one
-            if candidates:
-                # Scoring strategy:
-                # 1. Prefer '注册稿' or '封卷稿' (Final versions)
-                # 2. Prefer exact '招股说明书' without '申报稿'
-                # 3. Avoid '申报稿' if possible
-                
-                def get_score(ann_item):
-                    t = ann_item['announcementTitle']
-                    score = 0
-                    if '注册稿' in t: score += 100
-                    if '封卷稿' in t: score += 90
-                    # If it has neither "申报稿" nor "注册稿", it might be the final released version (often just "XX股份有限公司首次公开发行股票招股说明书")
-                    if '申报稿' not in t and '注册稿' not in t: score += 50
-                    
-                    if '申报稿' in t: score -= 10
-                    return score
-
-                # Sort by score desc, then by time desc (usually implied by order, but let's trust API order or existing list)
-                # API returns latest first usually?
-                candidates.sort(key=get_score, reverse=True)
-                target_announcement = candidates[0]
-                
-                # Log the selection if there were multiple options
-                if len(candidates) > 1:
-                     titles = [c['announcementTitle'] for c in candidates[:3]]
-                     logger.info(f"多份招股书候选项，已选择: {target_announcement['announcementTitle']}. (候选项: {titles})")
-
-            
-            if not target_announcement:
-                logger.warning(f"未找到符合条件的招股书文件: {code}. 可用标题: {all_titles[:3]}...")
-                continue
-                
-            # Construct Download URL
-            adjunct_url = target_announcement['adjunctUrl']
-            download_url = CNINFO_BASE_URL + adjunct_url
-            
-            # Clean filename
-            safe_name = name.replace('*', '').replace(':', '').replace('?', '')
-            filename = f"{code}_{safe_name}.pdf"
-            filepath = os.path.join(PDF_DIR, filename)
-            
-            self.download_file(download_url, filepath)
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - [PID:%(process)d] - %(levelname)s - %(message)s')
