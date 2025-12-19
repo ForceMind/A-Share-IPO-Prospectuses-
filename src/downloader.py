@@ -45,7 +45,7 @@ class Downloader:
             logger.error(f"获取 orgId 失败 ({code}): {e}")
             return None
 
-    def search_prospectus(self, code, org_id):
+    def search_prospectus(self, code, name, org_id):
         """
         搜索招股说明书
         """
@@ -58,7 +58,7 @@ class Downloader:
             'stock': f'{code},{org_id}',
             'searchkey': '招股说明书', # 显式搜索关键词
             'secid': '',
-            'category': '', # 移除特定分类，扩大搜索范围
+            'category': 'category_30_0202;category_30_0102', # IPO Prospectus, Listing Announcement
             'trade': '',
             'seDate': '', # 可以指定时间范围 '2019-01-01~2023-12-31'
             'sortName': '',
@@ -74,12 +74,30 @@ class Downloader:
         
         try:
             time.sleep(random.uniform(1, 3))
+            
+            # Strategy 1: Search by Code
+            logger.info(f"搜索尝试 1 (代码): {code}")
             response = self.session.post(CNINFO_SEARCH_URL, data=params, timeout=15)
             response.raise_for_status()
             data = response.json()
             
             if data.get('announcements'):
                 return data['announcements']
+            
+            # Strategy 2: Search by Name (if code fails)
+            if name:
+                logger.info(f"按代码搜索失败，尝试按名称搜索: {name}")
+                params['stock'] = ''
+                clean_name = name.replace('ST', '').replace('*', '').strip()
+                params['searchkey'] = f'{clean_name} 招股说明书'
+                
+                time.sleep(random.uniform(1, 3))
+                response = self.session.post(CNINFO_SEARCH_URL, data=params, timeout=15)
+                response.raise_for_status()
+                data = response.json()
+                if data.get('announcements'):
+                    return data['announcements']
+
             return []
         except Exception as e:
             logger.error(f"搜索招股书失败 ({code}): {e}")
@@ -145,7 +163,7 @@ class Downloader:
                 logger.warning(f"无法获取 orgId: {code}")
                 continue
             
-            announcements = self.search_prospectus(code, org_id)
+            announcements = self.search_prospectus(code, name, org_id)
             if not announcements:
                 logger.warning(f"未找到招股书: {code}")
                 continue
@@ -161,13 +179,28 @@ class Downloader:
             all_titles = [a['announcementTitle'] for a in announcements]
             logger.info(f"搜索到的公告标题: {all_titles}")
 
+            # Priority 1: "招股说明书" (exact or with code) AND NOT "摘要/更正/提示/发行结果/上市公告书"
+            # Priority 2: "上市公告书" if no prospectus found (sometimes they are combined or mislabeled)
+            
+            candidates = []
             for ann in announcements:
                 title = ann['announcementTitle']
-                if "招股说明书" in title and "摘要" not in title and "更正" not in title and "提示" not in title:
-                    # 优先找“注册稿”或“上市公告书”(不对，是招股书)
-                    # 这里的逻辑是：通常最新的那个（列表第一个）就是最终版
-                    target_announcement = ann
-                    break
+                # Basic filter
+                if "摘要" in title or "更正" in title or "提示" in title or "发行结果" in title or "网上路演" in title:
+                    continue
+                
+                if "招股说明书" in title:
+                    candidates.append(ann)
+            
+            # If candidates found, pick the one with '注册稿' or just the first one (latest)
+            if candidates:
+                # Prefer '注册稿'
+                for c in candidates:
+                    if '注册稿' in c['announcementTitle']:
+                        target_announcement = c
+                        break
+                if not target_announcement:
+                    target_announcement = candidates[0]
             
             if not target_announcement:
                 logger.warning(f"未找到符合条件的招股书文件: {code}. 可用标题: {all_titles[:3]}...")

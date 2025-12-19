@@ -85,6 +85,29 @@ def load_state():
             df = pd.read_excel(output_file)
             all_dividends = df.to_dict('records')
             logger.info(f"已加载 {len(all_dividends)} 条现有结果")
+            
+            # 识别提取失败（金额为0或N/A）的代码，从 processed_files 中移除，以便重试
+            # 注意：只有当 PDF 确实存在时才重试
+            failed_codes = set()
+            for item in all_dividends:
+                if str(item.get('amount')) == '0' or item.get('year') == 'N/A':
+                    failed_codes.add(str(item.get('code')).zfill(6))
+            
+            if failed_codes:
+                logger.info(f"发现 {len(failed_codes)} 个提取失败的记录，准备尝试重新解析...")
+                to_remove = []
+                for f in processed_files:
+                    code = f.split('_')[0]
+                    if code in failed_codes:
+                        to_remove.append(f)
+                
+                for f in to_remove:
+                    processed_files.remove(f)
+                
+                # 从 all_dividends 中移除这些失败记录，避免重复
+                all_dividends = [item for item in all_dividends if str(item.get('code')).zfill(6) not in failed_codes]
+                logger.info(f"已从处理列表中移除 {len(to_remove)} 个文件，将重新尝试解析")
+                
         except Exception as e:
             logger.error(f"加载现有Excel失败: {e}")
             
@@ -109,9 +132,14 @@ def generate_report(stock_list_path):
                 if code not in extraction_map:
                     extraction_map[code] = {'has_data': False, 'max_amount': 0}
                 
-                if row['amount'] > 0:
-                    extraction_map[code]['has_data'] = True
-                    extraction_map[code]['max_amount'] = max(extraction_map[code]['max_amount'], row['amount'])
+                # Use pd.isna() or similar to check for valid amount
+                try:
+                    amt = float(row['amount'])
+                    if amt > 0:
+                        extraction_map[code]['has_data'] = True
+                        extraction_map[code]['max_amount'] = max(extraction_map[code]['max_amount'], amt)
+                except (ValueError, TypeError):
+                    pass
 
         report_data = []
         pdf_files_set = set(os.listdir(PDF_DIR))
@@ -119,6 +147,7 @@ def generate_report(stock_list_path):
         for _, row in stocks_df.iterrows():
             code = row['code']
             name = row['name']
+            industry = row.get('industry', 'Unknown') # Include industry in report
             
             pdf_exists = False
             for f in pdf_files_set:
@@ -148,6 +177,7 @@ def generate_report(stock_list_path):
             report_data.append({
                 'code': code,
                 'name': name,
+                'industry': industry,
                 'status': status,
                 'detail': detail
             })
@@ -263,7 +293,6 @@ def run_pipeline(action='all', limit=None, csv_file='stock_list.csv', parallel=F
 
     if action in ['all', 'extract']:
         logger.info("=== 开始解析阶段 ===")
-        extractor = ProspectusExtractor()
         
         pdf_files = [f for f in os.listdir(PDF_DIR) if f.endswith('.pdf')]
         pdf_files = [f for f in pdf_files if f not in processed_files]
@@ -273,11 +302,50 @@ def run_pipeline(action='all', limit=None, csv_file='stock_list.csv', parallel=F
             
         logger.info(f"发现 {len(pdf_files)} 个未处理文件")
         
-        for pdf_file in tqdm(pdf_files):
-            process_file(pdf_file, extractor, all_dividends)
-            processed_files.add(pdf_file)
-            if len(processed_files) % 10 == 0:
-                save_results(all_dividends, processed_files)
+        if parallel:
+            logger.info("=== 启动多进程解析模式 (Multiprocessing) ===")
+            import multiprocessing
+            # Import process_pdf_worker from src.extractor but handle potential circular or direct import issues
+            try:
+                from src.extractor import process_pdf_worker
+            except ImportError:
+                # Fallback if run as script
+                from extractor import process_pdf_worker
+            
+            # Use 60% of CPU cores
+            num_cores = max(1, int(multiprocessing.cpu_count() * 0.6))
+            logger.info(f"使用 {num_cores} 个进程进行解析")
+            
+            # Using starmap requires arguments as tuples
+            tasks = [(f, PDF_DIR) for f in pdf_files]
+            
+            with multiprocessing.Pool(processes=num_cores) as pool:
+                # Use starmap to pass multiple arguments
+                results = list(tqdm(pool.starmap(process_pdf_worker, tasks), total=len(tasks)))
+                
+                for pdf_file, dividends, error in results:
+                    if error:
+                        logger.error(f"处理文件失败 {pdf_file}: {error}")
+                        # Don't mark as processed if error is severe, or maybe do? 
+                        # For now, let's assume we want to skip it in next run if it's broken, 
+                        # but here we just log. If we add to processed_files it won't be retried.
+                        # Let's add it to processed_files so we don't get stuck on one file.
+                    
+                    if dividends:
+                        all_dividends.extend(dividends)
+                    
+                    processed_files.add(pdf_file)
+                    
+                    if len(processed_files) % 100 == 0:
+                         save_results(all_dividends, processed_files)
+        else:
+            # Original Serial Implementation
+            extractor = ProspectusExtractor()
+            for pdf_file in tqdm(pdf_files):
+                process_file(pdf_file, extractor, all_dividends)
+                processed_files.add(pdf_file)
+                if len(processed_files) % 10 == 0:
+                    save_results(all_dividends, processed_files)
 
         save_results(all_dividends, processed_files)
         generate_report(stock_list_path)

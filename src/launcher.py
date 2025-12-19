@@ -11,8 +11,9 @@ def print_header():
     print("\n本脚本将自动执行以下步骤：")
     print("1. 检查并安装依赖 (Check Dependencies)")
     print("2. 获取股票列表 (Fetch Stock List)")
-    print("3. 并行下载与解析 PDF (Download & Extract)")
-    print("4. 生成状态报告 (Generate Report)")
+    print("3. 清理无效文件 (Audit & Clean)")
+    print("4. 并行下载与解析 PDF (Download & Extract)")
+    print("5. 生成状态报告 (Generate Report)")
     print("\n[提示] 您可以随时按 Ctrl+C 停止脚本，进度会自动保存。")
     print("-" * 60)
 
@@ -59,7 +60,15 @@ def main():
     if not run_command(get_stock_cmd, "获取最新股票列表"):
         pass # Continue even if list update fails, maybe old list works?
 
-    # 3. Run Pipeline
+    # 3. Audit & Clean (Optional but recommended)
+    # Automatically clean invalid/small files before processing
+    audit_script = os.path.join("src", "audit_and_clean.py")
+    audit_cmd = f"{sys.executable} {audit_script}"
+    print(f"\n[INFO] 正在检查文件完整性... (Auditing files)")
+    if not run_command(audit_cmd, "清理无效PDF文件"):
+         print(f"[WARN] 清理步骤失败，将继续执行...")
+
+    # 4. Run Pipeline
     main_script = os.path.join("src", "main.py")
     pipeline_cmd = f"{sys.executable} {main_script} --action all --parallel"
     

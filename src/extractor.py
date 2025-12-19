@@ -2,6 +2,12 @@ import pdfplumber
 import re
 import logging
 import pandas as pd
+try:
+    import pytesseract
+    from PIL import Image
+    HAS_OCR = True
+except ImportError:
+    HAS_OCR = False
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +49,12 @@ class ProspectusExtractor:
                     
                     # B. Text Extraction (Fallback)
                     text = page.extract_text()
+                    
+                    # C. OCR Fallback (if text is empty or too short)
+                    if (not text or len(text.strip()) < 100) and HAS_OCR:
+                        logger.info(f"页面 {page_num+1} 文本过少 ({len(text) if text else 0} 字符)，尝试 OCR 识别...")
+                        text = self._ocr_page(page)
+
                     data_from_text = self._process_text(text, page_num)
                     if data_from_text:
                         result.extend(data_from_text)
@@ -53,6 +65,17 @@ class ProspectusExtractor:
             logger.error(f"解析 PDF 失败 {pdf_path}: {e}")
             return []
 
+    def _ocr_page(self, page):
+        """Perform OCR on a pdfplumber page object"""
+        try:
+            # High resolution for better OCR
+            im = page.to_image(resolution=300)
+            text = pytesseract.image_to_string(im.original, lang='chi_sim+eng')
+            return text
+        except Exception as e:
+            logger.warning(f"OCR 失败: {e}")
+            return ""
+
     def _locate_target_pages(self, pdf):
         scores = {}
         total_pages = len(pdf.pages)
@@ -61,10 +84,30 @@ class ProspectusExtractor:
         start_page = 5 
         end_page = max(total_pages - 10, int(total_pages * 0.95))
 
-        for i in range(start_page, end_page):
+        # Heuristic: Check if this looks like a scanned PDF (first few checked pages have no text)
+        is_scanned_pdf = False
+        if HAS_OCR:
+            empty_pages_count = 0
+            check_sample = range(start_page, min(start_page + 10, end_page))
+            for i in check_sample:
+                if not pdf.pages[i].extract_text():
+                    empty_pages_count += 1
+            if len(check_sample) > 0 and empty_pages_count / len(check_sample) > 0.8:
+                is_scanned_pdf = True
+                logger.info("检测到可能是扫描版/纯图片PDF，启用OCR搜索模式 (速度较慢)...")
+
+        # In OCR mode, we increase step to avoid taking forever
+        step = 5 if is_scanned_pdf else 1
+
+        for i in range(start_page, end_page, step):
             try:
                 page = pdf.pages[i]
                 text = page.extract_text()
+                
+                # Fallback to OCR if text is missing and we suspect scanned PDF
+                if (not text or len(text.strip()) < 10) and is_scanned_pdf:
+                    text = self._ocr_page(page)
+
                 if not text:
                     continue
                 
@@ -276,3 +319,43 @@ class ProspectusExtractor:
                 final_data[year] = item
 
         return sorted(final_data.values(), key=lambda x: x['year'], reverse=True)
+
+def process_pdf_worker(pdf_file, pdf_dir):
+    """
+    Worker function for multiprocessing.
+    Instantiates its own extractor to avoid pickling issues and ensure thread/process safety.
+    """
+    try:
+        import os
+        pdf_path = os.path.join(pdf_dir, pdf_file)
+        
+        # Initialize extractor inside the process
+        extractor = ProspectusExtractor()
+        dividends = extractor.extract(pdf_path)
+        
+        stock_code = pdf_file.split('_')[0]
+        stock_name = pdf_file.split('_')[1].replace('.pdf', '') if '_' in pdf_file else 'Unknown'
+        
+        cleaned_results = []
+        if dividends:
+            for div in dividends:
+                div['code'] = stock_code
+                div['name'] = stock_name
+                div['source_file'] = pdf_file
+                cleaned_results.append(div)
+        else:
+            # Return a placeholder for "no data"
+            cleaned_results.append({
+                'code': stock_code,
+                'name': stock_name,
+                'year': 'N/A',
+                'amount': 0,
+                'page': 'N/A',
+                'source_file': pdf_file,
+                'note': '未提取到数据'
+            })
+            
+        return pdf_file, cleaned_results, None
+    except Exception as e:
+        return pdf_file, [], str(e)
+

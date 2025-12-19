@@ -33,7 +33,7 @@ def get_stock_list():
             'invt': 2,
             'fid': 'f26',
             'fs': 'm:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048',
-            'fields': 'f12,f14,f26',
+            'fields': 'f12,f14,f26,f100,f102,f103',
             '_': 1623833739532
         }
 
@@ -57,8 +57,13 @@ def get_stock_list():
                 code = stock['f12']
                 name = stock['f14']
                 listing_date = stock['f26']
+                industry = stock.get('f100', 'Unknown') # f100 seems to be the industry sector (e.g. 半导体)
 
                 if listing_date == '-' or not listing_date:
+                    continue
+                
+                # 排除 92 开头的股票 (北京证券交易所部分股票)
+                if code.startswith('92'):
                     continue
                 
                 try:
@@ -71,7 +76,8 @@ def get_stock_list():
                     stock_list.append({
                         'code': code,
                         'name': name,
-                        'listing_date': date_str
+                        'listing_date': date_str,
+                        'industry': industry
                     })
                     valid_count += 1
             
