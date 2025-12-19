@@ -14,7 +14,8 @@ import os
 import asyncio
 from src.task_manager import get_task_manager
 
-task_manager = get_task_manager()
+# Remove global instantiation to prevent multiprocessing recursive bomb
+# task_manager = get_task_manager()
 
 app = FastAPI(title="IPO Prospectus Dashboard")
 
@@ -28,21 +29,21 @@ async def index(request: Request):
 
 @app.get("/api/status")
 async def get_status():
-    return task_manager.get_status()
+    return get_task_manager().get_status()
 
 @app.post("/api/start")
 async def start_tasks(action: str = "all", limit: int = None):
-    task_manager.start_tasks(action=action, limit=limit)
+    get_task_manager().start_tasks(action=action, limit=limit)
     return {"status": "started"}
 
 @app.post("/api/stop")
 async def stop_tasks():
-    task_manager.stop_tasks()
+    get_task_manager().stop_tasks()
     return {"status": "stopping"}
 
 @app.post("/api/config")
 async def update_config(concurrency: int):
-    task_manager.set_concurrency(concurrency)
+    get_task_manager().set_concurrency(concurrency)
     return {"status": "updated", "concurrency": concurrency}
 
 @app.websocket("/ws/logs")
@@ -50,7 +51,7 @@ async def websocket_logs(websocket: WebSocket):
     await websocket.accept()
     try:
         while True:
-            logs = task_manager.get_logs()
+            logs = get_task_manager().get_logs()
             if logs:
                 for log in logs:
                     await websocket.send_text(log)

@@ -100,12 +100,27 @@ def main():
     if not os.path.exists("data"):
         os.makedirs("data")
         
-    # Always run or only if missing? User feedback implies "One click", so maybe check if exists?
-    # But user might want updates. Let's run it, it skips if valid usually or overwrites.
-    # The script currently overwrites.
-    get_stock_cmd = f'"{sys.executable}" {stock_list_script}'
-    if not run_command(get_stock_cmd, "获取最新股票列表"):
-        pass # Continue even if list update fails, maybe old list works?
+    stock_list_path = os.path.join("data", "stock_list.csv")
+    
+    # Check if stock list exists and is recent (e.g., less than 24 hours old)
+    should_fetch = True
+    if os.path.exists(stock_list_path):
+        try:
+            # Check file size to ensure it's not empty
+            if os.path.getsize(stock_list_path) > 1024:
+                # Check modification time
+                mtime = os.path.getmtime(stock_list_path)
+                if time.time() - mtime < 86400: # 24 hours
+                    print(f"\n[INFO] 股票列表已存在且较新，跳过重新获取。 (Using existing stock list)")
+                    should_fetch = False
+        except:
+            pass
+            
+    if should_fetch:
+        get_stock_cmd = f'"{sys.executable}" {stock_list_script}'
+        if not run_command(get_stock_cmd, "获取最新股票列表"):
+            pass # Continue even if list update fails, maybe old list works?
+
 
     # 3. Audit & Clean (Optional but recommended)
     # Automatically clean invalid/small files before processing
