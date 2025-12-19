@@ -4,6 +4,7 @@ import random
 import requests
 import logging
 import pandas as pd
+import math
 try:
     from src.config import USER_AGENTS, CNINFO_SEARCH_URL, CNINFO_BASE_URL, PDF_DIR, DATA_DIR
 except ImportError:
@@ -133,21 +134,22 @@ class Downloader:
             # --- Strategy 5: Sort by Pub Date ASC for Code (Oldest first often has IPO docs) ---
             # KEY FIX: The previous failure analysis showed that searching by keyword FAILED even if title matched.
             # But searching by DATE worked. Since we don't know the date, we MUST rely on sorting by date (oldest first)
-            # and paging through enough results, OR searching without keywords but filtered by specific categories if possible.
-            # BUT: 603171 had ColumnId: 250401||251302||251306||2516||2705
-            # 300929 had ColumnId: 09020202||160201||160203||250301||251302||251306||2516||2705
-            # Common Category: 251302 (IPO?), 251306, 2516, 2705
-            # 'category_30_0202' used in Strategy 1 might be wrong or outdated?
+            # and paging through enough results.
+            # User feedback indicates: "Look from the last page forward" or "Find the earliest announcements".
+            # "sortType": "asc" on "pubdate" should theoretically do this (Oldest -> Newest).
+            # But sometimes API default is DESC (Newest -> Oldest).
+            # If "asc" works, page 1 should be the oldest.
+            # If "asc" is ignored, we need to find total pages and request the last page.
             
             if not announcements:
                 logger.info(f"搜索尝试 5 (按日期正序 - 关键策略): {code}")
                 # Reset critical params
                 params['stock'] = f'{code},{org_id}'
-                params['searchkey'] = '' # Clear keyword to find ANYTHING because keyword search is BROKEN for these
+                params['searchkey'] = '' # Clear keyword to find ANYTHING
                 params['category'] = '' # Clear category to find ANYTHING
                 params['sortName'] = 'pubdate'
-                params['sortType'] = 'asc' # Oldest first
-                params['pageSize'] = 50 # Increase page size to catch early docs
+                params['sortType'] = 'asc' # Oldest first attempt
+                params['pageSize'] = 50 
                 
                 time.sleep(random.uniform(1, 3))
                 response = self.session.post(CNINFO_SEARCH_URL, data=params, timeout=15)
@@ -155,6 +157,48 @@ class Downloader:
                 data = response.json()
                 announcements = data.get('announcements', [])
                 if announcements is None: announcements = []
+
+                # --- Strategy 5b: If 'asc' didn't give us early dates (check first item date?), try getting total pages and fetching LAST page ---
+                # Check year of first item. If it's current year (e.g., 2025), then ASC failed.
+                is_recent = False
+                if announcements:
+                    first_date = announcements[0].get('announcementTime', 0)
+                    # Simple check: if timestamp is > 2024 roughly
+                    if first_date > 1704067200000: # 2024-01-01
+                         is_recent = True
+                         logger.info(f"策略5返回了近期数据，说明排序可能失效。尝试获取最后一页数据。")
+                
+                if not announcements or is_recent:
+                     # Get total pages from previous response if available, or just guess
+                     total_pages = 0
+                     if data.get('totalpages'):
+                         total_pages = data.get('totalpages')
+                     elif data.get('totalRecordNum'):
+                         total_pages = math.ceil(int(data.get('totalRecordNum')) / 50)
+                     
+                     if total_pages > 1:
+                         logger.info(f"尝试获取最后一页 (第 {total_pages} 页)...")
+                         params['pageNum'] = total_pages
+                         params['sortType'] = '' # Reset sort type to default (usually DESC)
+                         
+                         time.sleep(random.uniform(1, 3))
+                         response = self.session.post(CNINFO_SEARCH_URL, data=params, timeout=15)
+                         response.raise_for_status()
+                         data = response.json()
+                         page_announcements = data.get('announcements', [])
+                         if page_announcements:
+                             # Insert at beginning because these are likely older
+                             announcements = page_announcements + announcements
+                         
+                         # Also try second to last page just in case
+                         if total_pages > 1:
+                             params['pageNum'] = total_pages - 1
+                             time.sleep(random.uniform(1, 2))
+                             response = self.session.post(CNINFO_SEARCH_URL, data=params, timeout=15)
+                             if response.ok:
+                                 prev_page_data = response.json().get('announcements', [])
+                                 if prev_page_data:
+                                     announcements = prev_page_data + announcements
 
             # Filter logic
             exclude_keywords = ["摘要", "更正", "提示", "发行结果", "网上路演", "意见", "法律", "反馈", 
