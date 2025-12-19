@@ -149,7 +149,7 @@ class Downloader:
                 params['category'] = '' # Clear category to find ANYTHING
                 params['sortName'] = 'pubdate'
                 params['sortType'] = 'asc' # Oldest first attempt
-                params['pageSize'] = 50 
+                params['pageSize'] = 30 # Reduce page size to default to avoid timeouts or large payload issues
                 
                 time.sleep(random.uniform(1, 3))
                 response = self.session.post(CNINFO_SEARCH_URL, data=params, timeout=15)
@@ -168,37 +168,49 @@ class Downloader:
                          is_recent = True
                          logger.info(f"策略5返回了近期数据，说明排序可能失效。尝试获取最后一页数据。")
                 
+                # Logic to fetch last page if sorted wrong or no results on page 1 (but total > 0)
+                # NOTE: For Strategy 5b, we FORCE fetch the last page if candidates are empty or it's recent data.
                 if not announcements or is_recent:
                      # Get total pages from previous response if available, or just guess
                      total_pages = 0
                      if data.get('totalpages'):
                          total_pages = data.get('totalpages')
                      elif data.get('totalRecordNum'):
-                         total_pages = math.ceil(int(data.get('totalRecordNum')) / 50)
+                         total_pages = math.ceil(int(data.get('totalRecordNum')) / 30)
                      
+                     # If we have pages to traverse
                      if total_pages > 1:
-                         logger.info(f"尝试获取最后一页 (第 {total_pages} 页)...")
-                         params['pageNum'] = total_pages
-                         params['sortType'] = '' # Reset sort type to default (usually DESC)
+                         logger.info(f"尝试获取最后几页 (共 {total_pages} 页)...")
                          
-                         time.sleep(random.uniform(1, 3))
-                         response = self.session.post(CNINFO_SEARCH_URL, data=params, timeout=15)
-                         response.raise_for_status()
-                         data = response.json()
-                         page_announcements = data.get('announcements', [])
-                         if page_announcements:
-                             # Insert at beginning because these are likely older
-                             announcements = page_announcements + announcements
+                         # Reset sort params to ensure default order (DESC usually)
+                         params['sortName'] = ''
+                         params['sortType'] = '' 
                          
-                         # Also try second to last page just in case
+                         # Helper function to fetch and add
+                         def fetch_page(p_num):
+                             params['pageNum'] = p_num
+                             try:
+                                 time.sleep(random.uniform(1, 2))
+                                 r = self.session.post(CNINFO_SEARCH_URL, data=params, timeout=15)
+                                 if r.ok:
+                                     return r.json().get('announcements', [])
+                             except:
+                                 return []
+                             return []
+
+                         # Fetch the LAST page
+                         page_data = fetch_page(total_pages)
+                         if page_data: announcements = page_data + announcements
+                         
+                         # Fetch the SECOND TO LAST page
                          if total_pages > 1:
-                             params['pageNum'] = total_pages - 1
-                             time.sleep(random.uniform(1, 2))
-                             response = self.session.post(CNINFO_SEARCH_URL, data=params, timeout=15)
-                             if response.ok:
-                                 prev_page_data = response.json().get('announcements', [])
-                                 if prev_page_data:
-                                     announcements = prev_page_data + announcements
+                             page_data = fetch_page(total_pages - 1)
+                             if page_data: announcements = page_data + announcements
+                                     
+                         # Fetch the THIRD TO LAST page
+                         if total_pages > 2:
+                             page_data = fetch_page(total_pages - 2)
+                             if page_data: announcements = page_data + announcements
 
             # Filter logic
             exclude_keywords = ["摘要", "更正", "提示", "发行结果", "网上路演", "意见", "法律", "反馈", 
