@@ -53,6 +53,9 @@ class Downloader:
         """
         搜索招股说明书
         """
+        # User feedback: Regular search is unreliable.
+        # User feedback: ALWAYS go to the last page(s) of the full announcement list.
+        
         # Common params initialization
         params = {
             'pageNum': 1,
@@ -61,12 +64,12 @@ class Downloader:
             'tabName': 'fulltext',
             'plate': '',
             'stock': f'{code},{org_id}',
-            'searchkey': '招股说明书',
+            'searchkey': '', # INTENTIONALLY EMPTY to list ALL announcements
             'secid': '',
-            'category': 'category_30_0202;category_30_0102', 
+            'category': '', # INTENTIONALLY EMPTY to list ALL categories
             'trade': '',
             'seDate': '', 
-            'sortName': '',
+            'sortName': '', # Default sort (usually Newest -> Oldest)
             'sortType': '',
             'isHLtitle': 'true'
         }
@@ -77,236 +80,101 @@ class Downloader:
             params['column'] = 'bse'
         
         try:
-            time.sleep(random.uniform(1, 3))
+            # First, fetch page 1 to get total count
+            time.sleep(random.uniform(1, 2))
+            logger.info(f"获取总页数: {code}")
             
-            # --- Strategy 1: Standard Search (Stock + Category + Keyword) ---
-            # NOTE: Analysis shows some docs are NOT indexed with "招股说明书" keyword properly in the search engine,
-            # even if the title contains it! (e.g. 603171, 300929).
-            # They ARE found when searching by DATE range or broad browsing.
-            
-            logger.info(f"搜索尝试 1 (标准): {code}")
             response = self.session.post(CNINFO_SEARCH_URL, data=params, timeout=15)
             response.raise_for_status()
             data = response.json()
             
-            announcements = data.get('announcements', [])
-            if announcements is None: announcements = []
+            # Check for total records
+            total_records = data.get('totalRecordNum', 0)
+            if not total_records:
+                return []
+                
+            total_pages = 0
+            if data.get('totalpages'):
+                total_pages = data.get('totalpages')
+            else:
+                import math
+                total_pages = math.ceil(int(total_records) / 30)
+                
+            logger.info(f"总记录数: {total_records}, 总页数: {total_pages}")
             
-            # --- Strategy 2: Relaxed Category (Stock + Keyword Only) ---
-            if not announcements:
-                logger.info(f"搜索尝试 2 (放宽分类): {code}")
-                params['category'] = '' # Remove category constraint
-                time.sleep(random.uniform(1, 3))
-                response = self.session.post(CNINFO_SEARCH_URL, data=params, timeout=15)
-                response.raise_for_status()
-                data = response.json()
-                announcements = data.get('announcements', [])
-                if announcements is None: announcements = []
-
-            # --- Strategy 3: Name Search (Name + Keyword) ---
-            if not announcements and name:
-                logger.info(f"搜索尝试 3 (按名称): {name}")
-                params['stock'] = '' # Remove stock code constraint
-                clean_name = name.replace('ST', '').replace('*', '').strip()
-                params['searchkey'] = f'{clean_name} 招股说明书'
-                
-                time.sleep(random.uniform(1, 3))
-                response = self.session.post(CNINFO_SEARCH_URL, data=params, timeout=15)
-                response.raise_for_status()
-                data = response.json()
-                announcements = data.get('announcements', [])
-                if announcements is None: announcements = []
-
-            # --- Strategy 4: "Public Offering" Keyword (Name + '公开发行') ---
-            if not announcements and name:
-                logger.info(f"搜索尝试 4 (公开发行): {name}")
-                params['stock'] = ''
-                clean_name = name.replace('ST', '').replace('*', '').strip()
-                params['searchkey'] = f'{clean_name} 公开发行'
-                
-                time.sleep(random.uniform(1, 3))
-                response = self.session.post(CNINFO_SEARCH_URL, data=params, timeout=15)
-                response.raise_for_status()
-                data = response.json()
-                announcements = data.get('announcements', [])
-                if announcements is None: announcements = []
-
-            # --- Strategy 5: Sort by Pub Date ASC for Code (Oldest first often has IPO docs) ---
-            # KEY FIX: The previous failure analysis showed that searching by keyword FAILED even if title matched.
-            # But searching by DATE worked. Since we don't know the date, we MUST rely on sorting by date (oldest first)
-            # and paging through enough results.
-            # User feedback indicates: "Look from the last page forward" or "Find the earliest announcements".
-            # "sortType": "asc" on "pubdate" should theoretically do this (Oldest -> Newest).
-            # But sometimes API default is DESC (Newest -> Oldest).
-            # If "asc" works, page 1 should be the oldest.
-            # If "asc" is ignored, we need to find total pages and request the last page.
-            
-            if not announcements:
-                logger.info(f"搜索尝试 5 (按日期正序 - 关键策略): {code}")
-                # Reset critical params
-                params['stock'] = f'{code},{org_id}'
-                params['searchkey'] = '' # Clear keyword to find ANYTHING
-                params['category'] = '' # Clear category to find ANYTHING
-                params['sortName'] = 'pubdate'
-                params['sortType'] = 'asc' # Oldest first attempt
-                params['pageSize'] = 30 # Reduce page size to default to avoid timeouts or large payload issues
-                
-                time.sleep(random.uniform(1, 3))
-                response = self.session.post(CNINFO_SEARCH_URL, data=params, timeout=15)
-                response.raise_for_status()
-                data = response.json()
-                announcements = data.get('announcements', [])
-                if announcements is None: announcements = []
-
-                # --- Strategy 5b: If 'asc' didn't give us early dates (check first item date?), try getting total pages and fetching LAST page ---
-                # Check year of first item. If it's current year (e.g., 2025), then ASC failed.
-                is_recent = False
-                if announcements:
-                    first_date = announcements[0].get('announcementTime', 0)
-                    # Simple check: if timestamp is > 2024 roughly
-                    if first_date > 1704067200000: # 2024-01-01
-                         is_recent = True
-                         logger.info(f"策略5返回了近期数据，说明排序可能失效。尝试获取最后一页数据。")
-                
-                # Logic to fetch last page if sorted wrong or no results on page 1 (but total > 0)
-                # NOTE: For Strategy 5b, we FORCE fetch the last page if candidates are empty or it's recent data.
-                if not announcements or is_recent:
-                     # Get total pages from previous response if available, or just guess
-                     total_pages = 0
-                     if data.get('totalpages'):
-                         total_pages = data.get('totalpages')
-                     elif data.get('totalRecordNum'):
-                         total_pages = math.ceil(int(data.get('totalRecordNum')) / 30)
-                     
-                     # If we have pages to traverse
-                     if total_pages > 1:
-                         logger.info(f"尝试获取最后几页 (共 {total_pages} 页)...")
-                         
-                         # Reset sort params to ensure default order (DESC usually)
-                         params['sortName'] = ''
-                         params['sortType'] = '' 
-                         
-                         # Helper function to fetch and add
-                         def fetch_page(p_num):
-                             params['pageNum'] = p_num
-                             try:
-                                 time.sleep(random.uniform(1, 2))
-                                 r = self.session.post(CNINFO_SEARCH_URL, data=params, timeout=15)
-                                 if r.ok:
-                                     return r.json().get('announcements', [])
-                             except:
-                                 return []
-                             return []
-
-                         # Fetch the LAST page
-                         page_data = fetch_page(total_pages)
-                         if page_data: announcements = page_data + announcements
-                         
-                         # Fetch the SECOND TO LAST page
-                         if total_pages > 1:
-                             page_data = fetch_page(total_pages - 1)
-                             if page_data: announcements = page_data + announcements
-                                     
-                         # Fetch the THIRD TO LAST page
-                         if total_pages > 2:
-                             page_data = fetch_page(total_pages - 2)
-                             if page_data: announcements = page_data + announcements
-
-            # Filter logic
-            exclude_keywords = ["摘要", "更正", "提示", "发行结果", "网上路演", "意见", "法律", "反馈", 
-                                "H股", "增发", "配股", "可转债", "转换公司债券"]
+            # Strategy: Search from the LAST page backwards
+            # Usually IPO docs are at the very end.
             
             candidates = []
-            for ann in announcements:
-                title = ann['announcementTitle']
-                # Basic filter - STRICTLY exclude unwanted types
-                if any(kw in title for kw in exclude_keywords):
-                    continue
+            
+            # Pages to check: Last, Second Last, Third Last... up to Last - 5
+            # We want to check oldest pages.
+            # Page N is oldest (if default sort is Newest->Oldest).
+            
+            start_page = total_pages
+            end_page = max(1, total_pages - 15) # Look back 15 pages to be safe
+            
+            # Loop backwards from last page
+            for page_num in range(start_page, end_page - 1, -1):
+                logger.info(f"检查第 {page_num} 页...")
+                params['pageNum'] = page_num
                 
-                # Accept both 招股说明书 and 招股意向书
-                if "招股说明书" in title or "招股意向书" in title:
-                    candidates.append(ann)
-
-            if candidates:
-                return candidates
-
-            # --- Strategy 6: Final Resort - Search for "Listing Announcement" which might reveal prospectus in same context or be acceptable fallback if prospectus is truly missing in this index ---
-            if not candidates and name:
-                 logger.info(f"搜索尝试 6 (上市公告书 - 间接查找): {name}")
-                 params['stock'] = '' # No code
-                 clean_name = name.replace('ST', '').replace('*', '').strip()
-                 params['searchkey'] = f'{clean_name} 上市公告书'
-                 params['category'] = ''
-                 params['sortName'] = ''
-                 params['sortType'] = ''
-                 
-                 time.sleep(random.uniform(1, 3))
-                 response = self.session.post(CNINFO_SEARCH_URL, data=params, timeout=15)
-                 response.raise_for_status()
-                 data = response.json()
-                 announcements = data.get('announcements', [])
-                 
-                 # Check if announcements is None
-                 if announcements is None: announcements = []
-                 
-                 for ann in announcements:
-                    title = ann['announcementTitle']
-                    if any(kw in title for kw in exclude_keywords): continue
+                # IMPORTANT: For page paging without 'searchkey', we must be careful with sort params.
+                # If we don't provide sort params, it defaults to Newest -> Oldest.
+                # So Page 1 = Newest, Page Last = Oldest.
+                # If we provide 'asc' on 'pubdate', Page 1 = Oldest.
+                # BUT, previous tests showed 'asc' might be ignored or behave weirdly for some stocks.
+                # So we stick to DEFAULT SORT (Newest -> Oldest) and request the LAST PAGE.
+                
+                # Ensure sort params are empty to use default natural order
+                params['sortName'] = ''
+                params['sortType'] = ''
+                
+                time.sleep(random.uniform(1, 2))
+                response = self.session.post(CNINFO_SEARCH_URL, data=params, timeout=15)
+                
+                if not response.ok:
+                    continue
                     
-                    # If we find the Listing Announcement, sometimes the Prospectus is listed nearby or with similar title
-                    # But here we strictly look for "招股"
+                page_data = response.json()
+                announcements = page_data.get('announcements', [])
+                
+                if not announcements:
+                    # If last page is empty (maybe calculation off?), try previous
+                    continue
+                    
+                # Check for candidates in this page
+                # We want strictly "招股说明书" or "招股意向书"
+                # Exclude blacklisted keywords
+                
+                exclude_keywords = ["摘要", "更正", "提示", "发行结果", "网上路演", "意见", "法律", "反馈", 
+                                    "H股", "增发", "配股", "可转债", "转换公司债券", "保荐书", "审核", "评价", "承诺",
+                                    "持续督导", "半年", "季度", "年度"]
+                
+                for ann in announcements:
+                    title = ann['announcementTitle']
+                    
+                    if any(kw in title for kw in exclude_keywords):
+                        continue
+                    
                     if "招股说明书" in title or "招股意向书" in title:
+                        # Prioritize exact matches or "Initial" ones
                         candidates.append(ann)
+                
+                # If we found candidates > 0, we can stop?
+                # User says 301042 is on last page (19).
+                # My previous log showed checking page 18...13 and failing.
+                # Why did it fail? Maybe total_pages calculation was off by 1?
+                # or 'totalRecordNum' logic.
+                
+                if candidates:
+                    # We found something! Let's just return what we found in the oldest pages we checked.
+                    # We iterate from oldest (last page) backwards (to newer pages).
+                    # Actually range(start, end, -1) goes 19, 18, 17...
+                    # So we are checking oldest first.
+                    # If we found it on page 19, we are good.
+                    break
             
-            # --- Strategy 7: Super Broad - Name + "公开发行" with NO category, NO sort ---
-            if not candidates and name:
-                 logger.info(f"搜索尝试 7 (超级宽泛 - 公开发行): {name}")
-                 params['stock'] = ''
-                 clean_name = name.replace('ST', '').replace('*', '').strip()
-                 params['searchkey'] = f'{clean_name} 公开发行'
-                 params['category'] = ''
-                 params['pageSize'] = 50 
-                 
-                 time.sleep(random.uniform(1, 3))
-                 response = self.session.post(CNINFO_SEARCH_URL, data=params, timeout=15)
-                 response.raise_for_status()
-                 data = response.json()
-                 announcements = data.get('announcements', [])
-                 if announcements is None: announcements = []
-
-                 for ann in announcements:
-                    title = ann['announcementTitle']
-                    if any(kw in title for kw in exclude_keywords): continue
-                    
-                    if "招股说明书" in title or "招股意向书" in title:
-                        candidates.append(ann)
-            
-            # --- Strategy 8: Super Broad - Name only + NO category ---
-            # This is risky and returns many results, but we filter client side
-            if not candidates and name:
-                 logger.info(f"搜索尝试 8 (终极尝试 - 仅按名称): {name}")
-                 params['stock'] = ''
-                 clean_name = name.replace('ST', '').replace('*', '').strip()
-                 params['searchkey'] = clean_name
-                 params['category'] = ''
-                 params['pageSize'] = 100 # Maximum usually allowed
-                 params['sortName'] = 'pubdate'
-                 params['sortType'] = 'asc' # Try oldest first again with just name
-                 
-                 time.sleep(random.uniform(1, 3))
-                 response = self.session.post(CNINFO_SEARCH_URL, data=params, timeout=15)
-                 response.raise_for_status()
-                 data = response.json()
-                 announcements = data.get('announcements', [])
-                 if announcements is None: announcements = []
-
-                 for ann in announcements:
-                    title = ann['announcementTitle']
-                    if any(kw in title for kw in exclude_keywords): continue
-                    
-                    if "招股说明书" in title or "招股意向书" in title:
-                        candidates.append(ann)
-
             return candidates
 
         except Exception as e:
