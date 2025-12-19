@@ -5,5 +5,5 @@ if not exist venv (
     python -m venv venv
 )
 call venv\Scripts\activate
-python src/launcher.py
+python src/launcher.py --web
 pause

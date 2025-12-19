@@ -68,15 +68,34 @@ def main():
     if not run_command(audit_cmd, "清理无效PDF文件"):
          print(f"[WARN] 清理步骤失败，将继续执行...")
 
-    # 4. Run Pipeline
+    # 4. Run Pipeline or Web Dashboard
     main_script = os.path.join("src", "main.py")
-    pipeline_cmd = f"{sys.executable} {main_script} --action all --parallel"
+    web_script = os.path.join("src", "web_server.py")
     
-    print(f"\n[INFO] 正在启动并行采集流程... (Starting Pipeline)")
-    try:
-        subprocess.run(pipeline_cmd, shell=True)
-    except KeyboardInterrupt:
-        pass
+    if "--web" in sys.argv:
+        print(f"\n[INFO] 正在启动 Web 仪表盘... (Starting Dashboard)")
+        print(f"[INFO] 请在浏览器中打开: http://127.0.0.1:8001")
+        
+        # Try to open browser automatically
+        import webbrowser
+        threading_timer = None
+        try:
+            from threading import Timer
+            def open_browser():
+                webbrowser.open("http://127.0.0.1:8001")
+            Timer(1.5, open_browser).start()
+        except:
+            pass
+            
+        web_cmd = f"{sys.executable} {web_script}"
+        subprocess.run(web_cmd, shell=True)
+    else:
+        pipeline_cmd = f"{sys.executable} {main_script} --action all --parallel"
+        print(f"\n[INFO] 正在启动并行采集流程... (Starting Pipeline)")
+        try:
+            subprocess.run(pipeline_cmd, shell=True)
+        except KeyboardInterrupt:
+            pass
 
     print("\n" + "="*60)
     print(" 任务结束 (Finished)")
