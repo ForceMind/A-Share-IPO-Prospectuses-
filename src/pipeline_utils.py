@@ -17,6 +17,10 @@ def save_results(all_dividends, processed_files=None):
             if c not in df.columns:
                 df[c] = ''
         
+        # Ensure code is 6 digits string
+        if 'code' in df.columns:
+            df['code'] = df['code'].apply(lambda x: str(x).zfill(6) if pd.notnull(x) else x)
+
         # Reorder columns
         df = df[cols]
         
@@ -25,6 +29,12 @@ def save_results(all_dividends, processed_files=None):
             
         output_file = os.path.join(OUTPUT_DIR, 'dividends_summary.xlsx')
         try:
+            # Use xlsxwriter to enforce text format for 'code' column to prevent Excel from stripping leading zeros
+            # Note: This requires 'xlsxwriter' or 'openpyxl' installed. Assuming default engine is fine, 
+            # but we explicitly convert to string. Excel might still be annoying.
+            # To be safer, we can try to force string type in pandas.
+            df = df.astype({'code': str})
+            
             df.to_excel(output_file, index=False)
             logger.info(f"结果已更新至 {output_file}")
         except Exception as e:
