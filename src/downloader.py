@@ -97,7 +97,6 @@ class Downloader:
             if data.get('totalpages'):
                 total_pages = data.get('totalpages')
             else:
-                import math
                 total_pages = math.ceil(int(total_records) / 30)
             
             # FORCE FIX: Sometimes API returns total_pages that is 1 less than reality due to index starting at 0 or 1 confusion?

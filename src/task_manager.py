@@ -199,7 +199,7 @@ class TaskManager:
                     except psutil.NoSuchProcess:
                         pass
         except ImportError:
-            logging.warning("psutil module not found. Immediate process termination might not work reliably.")
+            logging.warning("psutil module not found. Immediate process termination might not work reliably. Please install psutil.")
         except Exception as e:
             logging.error(f"Error terminating processes: {e}")
 
