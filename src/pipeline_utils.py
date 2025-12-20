@@ -65,29 +65,48 @@ def load_state():
     if os.path.exists(output_file):
         try:
             df = pd.read_excel(output_file)
+            # Ensure code is string with zero padding
+            if 'code' in df.columns:
+                df['code'] = df['code'].apply(lambda x: str(x).zfill(6) if pd.notnull(x) else x)
+            
             all_dividends = df.to_dict('records')
             logger.info(f"已加载 {len(all_dividends)} 条现有结果")
             
-            # 识别提取失败（金额为0或N/A）的代码，从 processed_files 中移除，以便重试
-            # 注意：只有当 PDF 确实存在时才重试
-            failed_codes = set()
-            for item in all_dividends:
-                if str(item.get('amount')) == '0' or item.get('year') == 'N/A':
-                    failed_codes.add(str(item.get('code')).zfill(6))
+            # Identify failures or 'no data' records to retry
+            # Retry if:
+            # 1. amount is 0 or year is N/A
+            # 2. OR status/note indicates failure (e.g. 'section_found_no_data', 'scanned_pdf', 'no_section_found')
             
-            if failed_codes:
-                logger.info(f"发现 {len(failed_codes)} 个提取失败的记录，准备尝试重新解析...")
+            failed_files = set()
+            for item in all_dividends:
+                is_failed = False
+                if str(item.get('amount')) == '0' or item.get('year') == 'N/A':
+                    is_failed = True
+                
+                # Check note column for specific failure markers
+                note = str(item.get('note', ''))
+                if '未提取到数据' in note or '扫描件' in note or '未找到' in note:
+                    is_failed = True
+                
+                if is_failed:
+                    src_file = item.get('source_file')
+                    if src_file:
+                        failed_files.add(src_file)
+
+            if failed_files:
+                logger.info(f"发现 {len(failed_files)} 个之前提取失败/无数据的文件，准备重新解析...")
                 to_remove = []
                 for f in processed_files:
-                    code = f.split('_')[0]
-                    if code in failed_codes:
+                    if f in failed_files:
                         to_remove.append(f)
                 
                 for f in to_remove:
                     processed_files.remove(f)
                 
-                # 从 all_dividends 中移除这些失败记录，避免重复
-                all_dividends = [item for item in all_dividends if str(item.get('code')).zfill(6) not in failed_codes]
+                # Remove these failed records from all_dividends so we don't duplicate them
+                # (We will re-add them if extraction succeeds, or re-add failure record if it fails again)
+                all_dividends = [item for item in all_dividends if item.get('source_file') not in failed_files]
+                
                 logger.info(f"已从处理列表中移除 {len(to_remove)} 个文件，将重新尝试解析")
                 
         except Exception as e:

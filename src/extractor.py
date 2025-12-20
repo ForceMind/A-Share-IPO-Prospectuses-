@@ -63,6 +63,9 @@ class ProspectusExtractor:
                 scan_list = sorted(list(pages_to_scan))
                 found_data = False
                 
+                # Keep track of previous page text/header logic if needed for cross-page tables
+                last_page_header_years = []
+
                 for idx, page_num in enumerate(scan_list):
                     logger.info(f"正在处理页面 {page_num + 1}/{len(pdf.pages)} ({idx + 1}/{len(scan_list)}) - {os.path.basename(pdf_path)}")
                     page = pdf.pages[page_num]
@@ -78,10 +81,19 @@ class ProspectusExtractor:
                     text = page.extract_text()
                     
                     # C. OCR Fallback (DISABLED)
-                    # if (not text or len(text.strip()) < 100) and HAS_OCR:
-                    #    ...
+                    # ...
 
-                    data_from_text = self._process_text(text, page_num)
+                    # Pass previous page info if needed? 
+                    # For now, _process_text tries to look up many lines.
+                    # We might need to pass the *previous page's text* to _process_text if we want to support cross-page headers.
+                    prev_text = ""
+                    if idx > 0 and scan_list[idx-1] == page_num - 1:
+                         # If consecutive page, get its text
+                         try:
+                             prev_text = pdf.pages[scan_list[idx-1]].extract_text()
+                         except: pass
+
+                    data_from_text = self._process_text(text, page_num, prev_text)
                     if data_from_text:
                         result.extend(data_from_text)
                         found_data = True
@@ -304,12 +316,26 @@ class ProspectusExtractor:
         except ValueError:
             return None
 
-    def _process_text(self, text, page_num):
+    def _process_text(self, text, page_num, prev_text=""):
         results = []
-        if not text: return []
+        full_text = text
         
-        lines = text.split('\n')
-        for line in lines:
+        # Combine with previous page text to handle cross-page headers
+        # We only keep the last 20 lines of prev_text to avoid searching too far back
+        if prev_text:
+            prev_lines = prev_text.split('\n')[-20:]
+            full_text = '\n'.join(prev_lines) + '\n' + text
+            
+        if not full_text: return []
+        
+        lines = full_text.split('\n')
+        
+        # Mapping index in full_text to page_num. 
+        # Lines from prev_text belong to page_num - 1 (approximately, for reporting)
+        # But for simplicity, we attribute the finding to the current page if the data is there.
+        
+        for i, line in enumerate(lines):
+            # 1. Standard Pattern: Same line has Year and Amount
             if ('分红' in line or '派发' in line) and self.year_pattern.search(line):
                 year = self.year_pattern.search(line).group()
                 # Pattern: 1000.00万元
@@ -330,6 +356,106 @@ class ProspectusExtractor:
                             })
                         except:
                             pass
+            
+            # 2. Heuristic Pattern: "Cash Dividend ... 3200.00" without year, infer from context or header
+            elif ('现金分红' in line or '分红金额' in line) and not self.year_pattern.search(line):
+                # Check for amount
+                matches = re.findall(r'(\d{1,3}(,\d{3})*(\.\d+)?)\s*(万?元)?', line)
+                valid_matches = []
+                for m in matches:
+                    try:
+                        val = float(m[0].replace(',', ''))
+                        if val > 100: 
+                            valid_matches.append(val)
+                    except: pass
+                
+                if valid_matches:
+                    amount = max(valid_matches)
+                    
+                    # Try to find year in previous lines (extended scope to 20 lines to cover table headers)
+                    # And try to match COLUMNS if possible.
+                    # Simple approach: Find the closest line with years above this one.
+                    
+                    found_years = [] 
+                    for offset in range(1, 25): # Look up to 25 lines back
+                        if i - offset >= 0:
+                            prev_line = lines[i - offset]
+                            yms = self.year_pattern.findall(prev_line)
+                            if yms:
+                                # Found a line with years. Assume it's the header.
+                                # Sort descending to match recent years first? Or match by position?
+                                # Usually headers are: 2022 | 2021 | 2020
+                                # Data row:          3200 |   -  |  -
+                                found_years = [y for y in yms if 2010 <= int(y) <= 2030]
+                                break
+                    
+                    if found_years:
+                        # If we found years, which one corresponds to our amount?
+                        # If there is only one amount in the line, and multiple years in header...
+                        # Usually the first amount corresponds to the first year (Most Recent).
+                        # Let's assume the amount we found belongs to the most recent year in the header.
+                        
+                        # Better logic: Check if the line has multiple values/placeholders
+                        # line: "现金分红 ...  -  -  3,200.00"
+                        # We need to count columns. This is hard in plain text.
+                        # BUT, usually extracting the "Most Recent" year is safe if we pair it with the valid amount found.
+                        # IF there are multiple amounts, we might need more complex logic.
+                        # For now, let's pair the found amount with the FIRST year found in header (usually most recent).
+                        
+                        # Special case for 301566: The amount 3200 is at the END of the line, corresponding to the LAST year.
+                        # Header: 2023(1-6) | 2022 | 2021 | 2020
+                        # Row:      -       |  -   |  -   | 3200
+                        # So it should be 2020.
+                        
+                        # Try to count placeholders ("-") and values.
+                        # Simple regex to count value-like items (including "-")
+                        # Items usually separated by spaces.
+                        # Remove text prefix first.
+                        clean_line = line
+                        for kw in ['现金分红', '分红金额', '（万元）', '(万元)', '元']:
+                            clean_line = clean_line.replace(kw, '')
+                        
+                        # Split and count
+                        # Looking for patterns like "-", "0", "1,234.56"
+                        # Assuming years in header are sorted Descending (New -> Old)
+                        # And columns in row match left-to-right.
+                        
+                        cols = clean_line.split()
+                        # Filter to likely data columns (exclude random single chars if any, but keep "-")
+                        data_cols = [c for c in cols if re.match(r'^[\d,\.\-]+$', c)]
+                        
+                        year = found_years[0] # Default to most recent
+                        
+                        # Find which column our 'amount' is in
+                        amt_idx = -1
+                        for idx, c in enumerate(data_cols):
+                            # Check if this column roughly matches our amount (allow for comma/float diffs)
+                            if str(int(amount)) in c.replace(',', ''):
+                                amt_idx = idx
+                                break
+                        
+                        if amt_idx != -1 and len(found_years) >= len(data_cols):
+                             # Map 1:1 if possible
+                             # found_years might have more items if header had extra text
+                             # But usually years are distinct.
+                             
+                             # If we have 4 data cols and 4 years:
+                             # col 0 -> year 0
+                             # col 3 -> year 3
+                             if amt_idx < len(found_years):
+                                 year = found_years[amt_idx]
+                        
+                        final_amt = amount
+                        if final_amt > 200000:
+                            final_amt = final_amt / 10000
+                            
+                        results.append({
+                            'year': year,
+                            'amount': final_amt,
+                            'page': page_num + 1,
+                            'type': 'text_context_heuristic'
+                        })
+
         return results
 
     def _clean_result(self, raw_results):
