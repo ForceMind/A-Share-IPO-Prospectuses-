@@ -2,6 +2,7 @@ import pdfplumber
 import re
 import logging
 import pandas as pd
+import os
 try:
     import pytesseract
     from PIL import Image
@@ -22,6 +23,8 @@ class ProspectusExtractor:
     def extract(self, pdf_path):
         result = []
         try:
+            import os  # Ensure os is imported locally if needed, though it should be available via closure/module
+            
             with pdfplumber.open(pdf_path) as pdf:
                 # 1. Locate target pages
                 logger.debug(f"Scanning {pdf_path} for dividend sections...")
