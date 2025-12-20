@@ -321,7 +321,6 @@ class ProspectusExtractor:
         full_text = text
         
         # Combine with previous page text to handle cross-page headers
-        # We only keep the last 20 lines of prev_text to avoid searching too far back
         if prev_text:
             prev_lines = prev_text.split('\n')[-20:]
             full_text = '\n'.join(prev_lines) + '\n' + text
@@ -329,10 +328,6 @@ class ProspectusExtractor:
         if not full_text: return []
         
         lines = full_text.split('\n')
-        
-        # Mapping index in full_text to page_num. 
-        # Lines from prev_text belong to page_num - 1 (approximately, for reporting)
-        # But for simplicity, we attribute the finding to the current page if the data is there.
         
         for i, line in enumerate(lines):
             # 1. Standard Pattern: Same line has Year and Amount
@@ -372,76 +367,29 @@ class ProspectusExtractor:
                 if valid_matches:
                     amount = max(valid_matches)
                     
-                    # Try to find year in previous lines (extended scope to 20 lines to cover table headers)
-                    # And try to match COLUMNS if possible.
-                    # Simple approach: Find the closest line with years above this one.
-                    
                     found_years = [] 
                     for offset in range(1, 25): # Look up to 25 lines back
                         if i - offset >= 0:
                             prev_line = lines[i - offset]
                             yms = self.year_pattern.findall(prev_line)
                             if yms:
-                                # Found a line with years. Assume it's the header.
-                                # Sort descending to match recent years first? Or match by position?
-                                # Usually headers are: 2022 | 2021 | 2020
-                                # Data row:          3200 |   -  |  -
                                 found_years = [y for y in yms if 2010 <= int(y) <= 2030]
                                 break
                     
                     if found_years:
-                        # If we found years, which one corresponds to our amount?
-                        # If there is only one amount in the line, and multiple years in header...
-                        # Usually the first amount corresponds to the first year (Most Recent).
-                        # Let's assume the amount we found belongs to the most recent year in the header.
-                        
-                        # Better logic: Check if the line has multiple values/placeholders
-                        # line: "现金分红 ...  -  -  3,200.00"
-                        # We need to count columns. This is hard in plain text.
-                        # BUT, usually extracting the "Most Recent" year is safe if we pair it with the valid amount found.
-                        # IF there are multiple amounts, we might need more complex logic.
-                        # For now, let's pair the found amount with the FIRST year found in header (usually most recent).
-                        
-                        # Special case for 301566: The amount 3200 is at the END of the line, corresponding to the LAST year.
-                        # Header: 2023(1-6) | 2022 | 2021 | 2020
-                        # Row:      -       |  -   |  -   | 3200
-                        # So it should be 2020.
-                        
-                        # Try to count placeholders ("-") and values.
-                        # Simple regex to count value-like items (including "-")
-                        # Items usually separated by spaces.
-                        # Remove text prefix first.
+                        # Column logic
                         clean_line = line
                         for kw in ['现金分红', '分红金额', '（万元）', '(万元)', '元']:
                             clean_line = clean_line.replace(kw, '')
-                        
-                        # Split and count
-                        # Looking for patterns like "-", "0", "1,234.56"
-                        # Assuming years in header are sorted Descending (New -> Old)
-                        # And columns in row match left-to-right.
-                        
                         cols = clean_line.split()
-                        # Filter to likely data columns (exclude random single chars if any, but keep "-")
                         data_cols = [c for c in cols if re.match(r'^[\d,\.\-]+$', c)]
-                        
-                        year = found_years[0] # Default to most recent
-                        
-                        # Find which column our 'amount' is in
+                        year = found_years[0] 
                         amt_idx = -1
                         for idx, c in enumerate(data_cols):
-                            # Check if this column roughly matches our amount (allow for comma/float diffs)
                             if str(int(amount)) in c.replace(',', ''):
                                 amt_idx = idx
                                 break
-                        
                         if amt_idx != -1 and len(found_years) >= len(data_cols):
-                             # Map 1:1 if possible
-                             # found_years might have more items if header had extra text
-                             # But usually years are distinct.
-                             
-                             # If we have 4 data cols and 4 years:
-                             # col 0 -> year 0
-                             # col 3 -> year 3
                              if amt_idx < len(found_years):
                                  year = found_years[amt_idx]
                         
@@ -455,6 +403,33 @@ class ProspectusExtractor:
                             'page': page_num + 1,
                             'type': 'text_context_heuristic'
                         })
+
+            # 3. New Pattern: Long text description
+            if ('分红' in line or '分配' in line) and ('万元' in line or '亿元' in line):
+                 year_match = self.year_pattern.search(line)
+                 if year_match:
+                     year = year_match.group()
+                     # Regex for amount + unit, allowing space
+                     amount_matches = re.findall(r'(\d{1,3}(,\d{3})*(\.\d+)?)\s*(万?元|亿元)', line)
+                     for amt_str, _, _, unit in amount_matches:
+                         try:
+                             val = float(amt_str.replace(',', ''))
+                             final_val = 0
+                             if '亿' in unit:
+                                 final_val = val * 10000
+                             elif '万' in unit:
+                                 final_val = val
+                             else:
+                                 final_val = val / 10000
+                             
+                             if final_val > 10:
+                                 results.append({
+                                    'year': year,
+                                    'amount': final_val,
+                                    'page': page_num + 1,
+                                    'type': 'text_description'
+                                })
+                         except: pass
 
         return results
 
@@ -555,4 +530,3 @@ def process_pdf_worker(pdf_file, pdf_dir, log_queue=None):
         return pdf_file, cleaned_results, None
     except Exception as e:
         return pdf_file, [], str(e)
-

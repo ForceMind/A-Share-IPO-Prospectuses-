@@ -152,7 +152,7 @@ class Downloader:
                 
                 exclude_keywords = ["摘要", "更正", "提示", "发行结果", "网上路演", "意见", "法律", "反馈", 
                                     "H股", "增发", "配股", "可转债", "转换公司债券", "保荐书", "审核", "评价", "承诺",
-                                    "持续督导", "半年", "季度", "年度"]
+                                    "持续督导", "半年", "季度", "年度", "律师工作报告", "上市公告书"]
                 
                 for ann in announcements:
                     title = ann['announcementTitle']
@@ -307,6 +307,12 @@ class Downloader:
         announcements.sort(key=get_score, reverse=True)
         target_announcement = announcements[0]
         
+        # Double check if the selected candidate is actually valid (score > 0 or at least contains keywords)
+        # If score is very low, it might be a false positive if we were too lenient.
+        if "招股说明书" not in target_announcement['announcementTitle'] and "招股意向书" not in target_announcement['announcementTitle']:
+             logger.warning(f"最终选中的文件标题不包含招股书关键字: {target_announcement['announcementTitle']}，跳过")
+             return
+
         if len(announcements) > 1:
              titles = [c['announcementTitle'] for c in announcements[:3]]
              logger.info(f"多份招股书候选项，已选择: {target_announcement['announcementTitle']}. (候选项: {titles})")
@@ -315,9 +321,21 @@ class Downloader:
         adjunct_url = target_announcement['adjunctUrl']
         download_url = CNINFO_BASE_URL + adjunct_url
         
+        # If local file exists (and we reached here, meaning we decided to process it),
+        # check if it needs replacement?
+        # The previous logic had: if os.path.exists(filepath): return
+        # But if we want to fix WRONG files, we should check file content type or just force overwrite if directed.
+        # For now, let's trust the user to delete wrong files manually or use a "force" flag.
+        # But wait, the task requirement implies we should fix it.
+        
+        # Check if existing file is likely wrong (small size? or we can't easily check content without downloading).
+        # A simple heuristic: if we are here, process_stock was called.
+        # The caller (run loop) checks existence. 
+        # So we only reach here if file doesn't exist OR we want to overwrite.
+        
         self.download_file(download_url, filepath)
 
-    def run(self, stock_list_path=None):
+    def run(self, stock_list_path=None, force_codes=None):
         if not stock_list_path:
             stock_list_path = os.path.join(DATA_DIR, 'stock_list.csv')
         
@@ -328,8 +346,7 @@ class Downloader:
         df = pd.read_csv(stock_list_path)
         logger.info(f"加载了 {len(df)} 个待处理股票")
 
-        # Optimization: Pre-scan directory to avoid os.listdir() in loop
-        # Store just the stock codes (first part of filename) for faster lookup
+        # Optimization: Pre-scan directory
         existing_codes = set()
         if os.path.exists(PDF_DIR):
             for f in os.listdir(PDF_DIR):
@@ -342,7 +359,11 @@ class Downloader:
             code = str(row['code']).zfill(6)
             name = row['name']
             
-            if code in existing_codes:
+            # If explicit force list provided, only process those
+            if force_codes:
+                if code not in force_codes:
+                    continue
+            elif code in existing_codes:
                 continue
 
             self.process_stock(code, name)
