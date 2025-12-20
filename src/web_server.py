@@ -42,9 +42,13 @@ async def stop_tasks():
     return {"status": "stopping"}
 
 @app.post("/api/config")
-async def update_config(concurrency: int):
-    get_task_manager().set_concurrency(concurrency)
-    return {"status": "updated", "concurrency": concurrency}
+async def update_config(download_concurrency: int = None, extract_concurrency: int = None):
+    get_task_manager().set_concurrency(download=download_concurrency, extract=extract_concurrency)
+    return {
+        "status": "updated", 
+        "download_concurrency": get_task_manager().status.get("download_concurrency"),
+        "extract_concurrency": get_task_manager().status.get("extract_concurrency")
+    }
 
 @app.websocket("/ws/logs")
 async def websocket_logs(websocket: WebSocket):

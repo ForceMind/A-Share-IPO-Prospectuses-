@@ -25,7 +25,8 @@ class TaskManager:
             "completed_tasks": 0,
             "failed_tasks": 0,
             "current_action": "Idle",
-            "concurrency": 4,
+            "download_concurrency": 4,
+            "extract_concurrency": 4,
             "start_time": None,
             "elapsed_time": 0
         }
@@ -135,12 +136,13 @@ class TaskManager:
             self.status["elapsed_time"] = int(time.time() - self.status["start_time"])
         return self.status
 
-    def set_concurrency(self, value: int):
+    def set_concurrency(self, download: Optional[int] = None, extract: Optional[int] = None):
         with self._lock:
-            self.status["concurrency"] = max(1, min(value, 50))
-            # Note: We don't dynamically resize the active executor easily in standard concurrent.futures
-            # but we can use this for the next batch or next start.
-            logging.info(f"Concurrency set to {self.status['concurrency']}")
+            if download is not None:
+                self.status["download_concurrency"] = max(1, min(download, 50))
+            if extract is not None:
+                self.status["extract_concurrency"] = max(1, min(extract, 50))
+            logging.info(f"Concurrency updated: Download={self.status.get('download_concurrency')}, Extract={self.status.get('extract_concurrency')}")
 
     def start_tasks(self, action: str = "all", limit: Optional[int] = None):
         if self.status["is_running"]:
@@ -211,7 +213,7 @@ class TaskManager:
                 self.status["is_running"] = False
                 return
 
-            logging.info(f"Task started: Action={action}, Limit={limit}, Concurrency={self.status['concurrency']}")
+            logging.info(f"Task started: Action={action}, Limit={limit}, Download Concurrency={self.status['download_concurrency']}, Extract Concurrency={self.status['extract_concurrency']}")
 
             # 1. Download if needed
             if action in ["all", "download"] and not self.stop_event.is_set():
@@ -254,7 +256,7 @@ class TaskManager:
             self.status["completed_tasks"] = 0
             
             # Prepare chunks
-            concurrency = self.status["concurrency"]
+            concurrency = self.status["download_concurrency"]
             chunk_size = (total_stocks + concurrency - 1) // concurrency  # Ceiling division
             
             # Split dataframe into list of list of dicts/tuples for pickling
@@ -322,17 +324,20 @@ class TaskManager:
             pdf_files = pdf_files[:limit]
         
         self.status["total_tasks"] = len(pdf_files)
+        self.status["completed_tasks"] = 0
+        self.status["failed_tasks"] = 0
+
         if not pdf_files:
             logging.info("No new files to extract.")
             return
 
-        logging.info(f"Starting extraction for {len(pdf_files)} files with concurrency {self.status['concurrency']}")
+        logging.info(f"Starting extraction for {len(pdf_files)} files with concurrency {self.status['extract_concurrency']}")
         
         # Use ProcessPoolExecutor for CPU-bound extraction
         # Must use Manager Queue for logging in multiprocessing
         # Note: self.mp_log_queue is already a Manager Queue created in __init__
         
-        with ProcessPoolExecutor(max_workers=self.status["concurrency"]) as executor:
+        with ProcessPoolExecutor(max_workers=self.status["extract_concurrency"]) as executor:
             from functools import partial
             # Prepare tasks
             # Pass mp_log_queue to worker

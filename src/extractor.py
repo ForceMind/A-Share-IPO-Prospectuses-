@@ -24,12 +24,13 @@ class ProspectusExtractor:
         try:
             with pdfplumber.open(pdf_path) as pdf:
                 # 1. Locate target pages
+                logger.debug(f"Scanning {pdf_path} for dividend sections...")
                 target_pages = self._locate_target_pages(pdf)
                 if not target_pages:
                     logger.warning(f"未定位到分红章节: {pdf_path}")
                     return []
                 
-                logger.info(f"定位到目标页面: {target_pages}")
+                logger.info(f"定位到目标页面: {target_pages} (File: {os.path.basename(pdf_path)})")
 
                 pages_to_scan = set()
                 for p in target_pages:
@@ -38,7 +39,9 @@ class ProspectusExtractor:
                         if p + offset < len(pdf.pages):
                             pages_to_scan.add(p + offset)
                 
-                for page_num in sorted(list(pages_to_scan)):
+                scan_list = sorted(list(pages_to_scan))
+                for idx, page_num in enumerate(scan_list):
+                    logger.info(f"正在处理页面 {page_num + 1}/{len(pdf.pages)} ({idx + 1}/{len(scan_list)}) - {os.path.basename(pdf_path)}")
                     page = pdf.pages[page_num]
                     
                     # A. Table Extraction
