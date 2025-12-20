@@ -9,10 +9,15 @@ logger = logging.getLogger(__name__)
 def save_results(all_dividends, processed_files=None):
     if all_dividends:
         df = pd.DataFrame(all_dividends)
+        # Ensure 'note' is included in columns, and others like 'status' if we added it
         cols = ['code', 'name', 'year', 'amount', 'page', 'source_file', 'note']
+        
+        # Add columns if they don't exist
         for c in cols:
             if c not in df.columns:
                 df[c] = ''
+        
+        # Reorder columns
         df = df[cols]
         
         if not os.path.exists(OUTPUT_DIR):

@@ -367,6 +367,8 @@ class TaskManager:
                         
                         # Periodic save
                         if self.status["completed_tasks"] % 10 == 0:
+                            # Note: We save processed_files, which now includes files with 'no data' status.
+                            # So they WILL be skipped on next run.
                             save_results(all_dividends, processed_files)
                             
                     except Exception as e:

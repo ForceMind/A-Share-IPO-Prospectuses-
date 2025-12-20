@@ -3,12 +3,15 @@ import re
 import logging
 import pandas as pd
 import os
-try:
-    import pytesseract
-    from PIL import Image
-    HAS_OCR = True
-except ImportError:
-    HAS_OCR = False
+
+# Disable OCR completely as requested
+HAS_OCR = False
+# try:
+#     import pytesseract
+#     from PIL import Image
+#     HAS_OCR = True
+# except ImportError:
+#     HAS_OCR = False
 
 logger = logging.getLogger(__name__)
 
@@ -23,15 +26,30 @@ class ProspectusExtractor:
     def extract(self, pdf_path):
         result = []
         try:
-            import os  # Ensure os is imported locally if needed, though it should be available via closure/module
+            import os
             
             with pdfplumber.open(pdf_path) as pdf:
+                # 0. Check if PDF is text-searchable
+                has_text_content = False
+                # Check first 20 pages or all pages if less
+                check_pages = range(min(20, len(pdf.pages)))
+                for i in check_pages:
+                    if pdf.pages[i].extract_text():
+                        has_text_content = True
+                        break
+                
+                if not has_text_content:
+                    logger.warning(f"文件似乎是纯图片/扫描件 (File: {os.path.basename(pdf_path)})")
+                    return [{'note': '扫描件/无法提取文本，需人工处理', 'status': 'scanned_pdf'}]
+
                 # 1. Locate target pages
                 logger.debug(f"Scanning {pdf_path} for dividend sections...")
                 target_pages = self._locate_target_pages(pdf)
+                
                 if not target_pages:
                     logger.warning(f"未定位到分红章节: {pdf_path}")
-                    return []
+                    # Distinguish between no keywords vs no relevant section
+                    return [{'note': '可提取文本，但未找到分红章节关键字', 'status': 'no_section_found'}]
                 
                 logger.info(f"定位到目标页面: {target_pages} (File: {os.path.basename(pdf_path)})")
 
@@ -43,6 +61,8 @@ class ProspectusExtractor:
                             pages_to_scan.add(p + offset)
                 
                 scan_list = sorted(list(pages_to_scan))
+                found_data = False
+                
                 for idx, page_num in enumerate(scan_list):
                     logger.info(f"正在处理页面 {page_num + 1}/{len(pdf.pages)} ({idx + 1}/{len(scan_list)}) - {os.path.basename(pdf_path)}")
                     page = pdf.pages[page_num]
@@ -52,34 +72,44 @@ class ProspectusExtractor:
                     data_from_table = self._process_tables(tables, page_num)
                     if data_from_table:
                         result.extend(data_from_table)
+                        found_data = True
                     
                     # B. Text Extraction (Fallback)
                     text = page.extract_text()
                     
-                    # C. OCR Fallback (if text is empty or too short)
-                    if (not text or len(text.strip()) < 100) and HAS_OCR:
-                        logger.info(f"页面 {page_num+1} 文本过少 ({len(text) if text else 0} 字符)，尝试 OCR 识别...")
-                        text = self._ocr_page(page)
+                    # C. OCR Fallback (DISABLED)
+                    # if (not text or len(text.strip()) < 100) and HAS_OCR:
+                    #    ...
 
                     data_from_text = self._process_text(text, page_num)
                     if data_from_text:
                         result.extend(data_from_text)
+                        found_data = True
                 
-                return self._clean_result(result)
+                if result:
+                    return self._clean_result(result)
+                else:
+                    return [{'note': '找到分红章节，但未提取到有效数字数据', 'status': 'section_found_no_data'}]
 
         except Exception as e:
             logger.error(f"解析 PDF 失败 {pdf_path}: {e}")
-            return []
+            return [{'note': f'解析出错: {str(e)}', 'status': 'error'}]
 
     def _ocr_page(self, page):
         """Perform OCR on a pdfplumber page object"""
+        if not HAS_OCR:
+            return ""
         try:
             # High resolution for better OCR
             im = page.to_image(resolution=300)
             text = pytesseract.image_to_string(im.original, lang='chi_sim+eng')
             return text
         except Exception as e:
-            logger.warning(f"OCR 失败: {e}")
+            # Suppress noisy tesseract not found errors if we know it might fail
+            if "tesseract is not installed" in str(e):
+                logger.warning("OCR skipped: Tesseract not found.")
+            else:
+                logger.warning(f"OCR 失败: {e}")
             return ""
 
     def _locate_target_pages(self, pdf):
@@ -373,12 +403,19 @@ def process_pdf_worker(pdf_file, pdf_dir, log_queue=None):
         cleaned_results = []
         if dividends:
             for div in dividends:
+                # If dividend entry has a 'status' or 'note', propagate it
                 div['code'] = stock_code
                 div['name'] = stock_name
                 div['source_file'] = pdf_file
+                
+                # Ensure fields exist even if it's an error/note object
+                if 'year' not in div: div['year'] = 'N/A'
+                if 'amount' not in div: div['amount'] = 0
+                if 'page' not in div: div['page'] = 'N/A'
+                
                 cleaned_results.append(div)
         else:
-            # Return a placeholder for "no data"
+            # Fallback for empty list (should be covered by extract returning list of 1 dict now)
             cleaned_results.append({
                 'code': stock_code,
                 'name': stock_name,
