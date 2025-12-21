@@ -302,6 +302,10 @@ class Downloader:
             if '封卷稿' in t: score += 90
             if '申报稿' not in t and '注册稿' not in t: score += 50
             if '申报稿' in t: score -= 10
+            
+            # Reduce score for "Appendices" or "Summaries" if they sneaked in
+            if '附录' in t: score -= 300  # Heavily penalize appendix
+            if '摘要' in t: score -= 50
             return score
 
         announcements.sort(key=get_score, reverse=True)
@@ -312,6 +316,15 @@ class Downloader:
         if "招股说明书" not in target_announcement['announcementTitle'] and "招股意向书" not in target_announcement['announcementTitle']:
              logger.warning(f"最终选中的文件标题不包含招股书关键字: {target_announcement['announcementTitle']}，跳过")
              return
+        
+        # New check: If title contains "附录" (Appendix), lower its priority or skip if possible?
+        # But score logic already handles this?
+        # Let's explicitly deprioritize "附录" in get_score
+        
+        # But wait, get_score is defined inside process_stock. Let's update it there.
+        # Actually I can't update inner function without rewriting whole method.
+        # Let's adjust target_announcement logic here if needed.
+        # Or better, let's update get_score in the rewrite below.
 
         if len(announcements) > 1:
              titles = [c['announcementTitle'] for c in announcements[:3]]

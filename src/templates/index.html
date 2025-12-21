@@ -67,6 +67,9 @@
                         <button id="btn-start" class="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded transition">
                             开始任务
                         </button>
+                        <button id="btn-audit" class="w-full bg-yellow-600 hover:bg-yellow-700 text-white font-bold py-2 px-4 rounded transition">
+                            校验文件
+                        </button>
                         <button id="btn-stop" class="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded transition">
                             停止任务
                         </button>
@@ -111,6 +114,7 @@
     <script>
         const btnStart = document.getElementById('btn-start');
         const btnStop = document.getElementById('btn-stop');
+        const btnAudit = document.getElementById('btn-audit'); // New button
         const btnClearLogs = document.getElementById('btn-clear-logs');
         const inputDownloadConcurrency = document.getElementById('input-download-concurrency');
         const inputExtractConcurrency = document.getElementById('input-extract-concurrency');
@@ -184,6 +188,14 @@
             await fetch('/api/start?action=all', { method: 'POST' });
             const line = document.createElement('div');
             line.textContent = '[系统] 已发送启动指令...';
+            line.style.color = '#ffff00';
+            logWindow.appendChild(line);
+        };
+
+        btnAudit.onclick = async () => {
+            await fetch('/api/start?action=audit', { method: 'POST' });
+            const line = document.createElement('div');
+            line.textContent = '[系统] 已发送文件校验指令...';
             line.style.color = '#ffff00';
             logWindow.appendChild(line);
         };

@@ -259,7 +259,7 @@ class ProspectusExtractor:
             
             # Strategy 2: Horizontal (Year in Row)
             for row in table:
-                row_clean = [str(c).replace('\n', '').strip() if c else '' for c in row]
+                row_clean = [str(c).replace('\n', ' ').strip() if c else '' for c in row]
                 row_text = ' '.join(row_clean)
                 
                 year_matches = self.year_pattern.findall(row_text)
@@ -268,19 +268,49 @@ class ProspectusExtractor:
                 years = sorted(list(set([y for y in year_matches if 2010 <= int(y) <= 2030])))
                 if not years: continue
                 
-                year = years[0]
+                year = years[0] # Take the first found year in the row
 
-                # Row must contain keyword
-                if not ('分红' in row_text or '股利' in row_text or '派发' in row_text):
+                # Check keywords again, but relax it if "Amount" column has "Cash Dividend" implied
+                # For 605180, row contains "2017年股东会" and "向公司股东分配现金股利 8,000万元"
+                # "现金股利" is a keyword.
+                
+                has_keyword = False
+                if any(kw in row_text for kw in ['分红', '股利', '派发', '现金']):
+                    has_keyword = True
+                
+                if not has_keyword:
                      continue
                 
                 amounts = []
                 for cell in row_clean:
-                    amt = self._parse_amount(cell)
-                    if amt is not None:
-                        # Ensure it's not the year
-                        if 2010 <= amt <= 2030: continue
-                        amounts.append(amt)
+                    # Enhanced extraction for mixed text cells like "分配现金股利\n8,000万元"
+                    # Try regex on the cell content
+                    matches = re.findall(r'(\d{1,3}(,\d{3})*(\.\d+)?)\s*(万?元|亿元)', cell)
+                    if matches:
+                        for amt_str, _, _, unit in matches:
+                            try:
+                                val = float(amt_str.replace(',', ''))
+                                final_val = 0
+                                if '亿' in unit:
+                                    final_val = val * 10000
+                                elif '万' in unit:
+                                    final_val = val
+                                else:
+                                    final_val = val / 10000
+                                
+                                # Ignore if it looks like the year itself (e.g. 2017)
+                                if 2010 <= final_val <= 2030 and final_val == float(year):
+                                    continue
+                                    
+                                if final_val > 0:
+                                    amounts.append(final_val)
+                            except: pass
+                    else:
+                        # Fallback to strict parse
+                        amt = self._parse_amount(cell)
+                        if amt is not None:
+                            if 2010 <= amt <= 2030: continue
+                            amounts.append(amt)
                 
                 if amounts:
                      val = max(amounts) # Best guess
@@ -288,7 +318,7 @@ class ProspectusExtractor:
                         'year': year,
                         'amount': val,
                         'page': page_num + 1,
-                        'type': 'table_horizontal'
+                        'type': 'table_horizontal_mixed'
                     })
 
         return extracted_data

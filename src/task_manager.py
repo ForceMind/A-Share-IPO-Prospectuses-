@@ -222,6 +222,15 @@ class TaskManager:
                 self._run_download_phase(stock_list_path, limit)
                 logging.info("Step 1/2: Download phase completed.")
 
+            # 1.5. Audit/Validation Phase (Optional but recommended after download)
+            # Only run if we did download phase OR explicitly requested audit?
+            # User wants it integrated. Let's add it as a phase if download was part of the plan.
+            if action in ["all", "download", "audit"] and not self.stop_event.is_set():
+                self.status["current_action"] = "Auditing"
+                logging.info(f"Step 1.5: Starting file integrity audit [PID:{os.getpid()}]...")
+                self._run_audit_phase()
+                logging.info("Step 1.5: Audit phase completed.")
+
             # 2. Extract if needed
             if action in ["all", "extract"] and not self.stop_event.is_set():
                 self.status["current_action"] = "Extracting"
@@ -240,6 +249,18 @@ class TaskManager:
         finally:
             self.status["is_running"] = False
             self.status["current_action"] = "Idle"
+
+    def _run_audit_phase(self):
+        """
+        Executes the file integrity audit using multi-threading.
+        """
+        from src.audit_and_clean import check_and_fix_pdf_type
+        # Use a reasonable concurrency for I/O bound check, or re-use download concurrency setting
+        concurrency = self.status.get("download_concurrency", 4)
+        try:
+            check_and_fix_pdf_type(concurrency=concurrency)
+        except Exception as e:
+            logging.error(f"Audit phase failed: {e}")
 
     def _run_download_phase(self, stock_list_path: str, limit: Optional[int]):
         """
