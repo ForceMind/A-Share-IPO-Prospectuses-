@@ -60,6 +60,10 @@ def run_pipeline(action='all', limit=None, csv_file='stock_list.csv', parallel=F
 
     # If parallel mode is requested, use TaskManager
     if parallel:
+        # Note: parallel mode argument from CLI starts the backend task manager logic in this process.
+        # But if we use the Web Server, the server starts its own TaskManager instance.
+        # Here we assume CLI usage.
+        
         logger.info(f"=== 启动并行模式 [PID:{os.getpid()}] (Action: {action}, Limit: {limit}) ===")
         
         # Delayed import and instantiation to avoid multiprocessing fork issues
@@ -86,6 +90,14 @@ def run_pipeline(action='all', limit=None, csv_file='stock_list.csv', parallel=F
 
     # Serial Mode (Legacy / Fallback)
     logger.info(f"=== 启动串行模式 [PID:{os.getpid()}] (Action: {action}, Limit: {limit}) ===")
+    
+    # Audit phase for serial mode if requested (or included in all)
+    if action in ['audit']:
+        # Standalone audit
+        from src.audit_and_clean import check_and_fix_pdf_type
+        check_and_fix_pdf_type()
+        return
+
     processed_files, all_dividends = load_state()
 
     # 1. Download Phase

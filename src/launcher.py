@@ -124,11 +124,13 @@ def main():
 
     # 3. Audit & Clean (Optional but recommended)
     # Automatically clean invalid/small files before processing
-    audit_script = os.path.join("src", "audit_and_clean.py")
-    audit_cmd = f'"{sys.executable}" {audit_script}'
-    print(f"\n[INFO] 正在检查文件完整性... (Auditing files)")
-    if not run_command(audit_cmd, "清理无效PDF文件"):
-         print(f"[WARN] 清理步骤失败，将继续执行...")
+    # Commented out because user complained about waiting time.
+    # It is now integrated into the Web UI as an optional "Check Files" button.
+    # audit_script = os.path.join("src", "audit_and_clean.py")
+    # audit_cmd = f'"{sys.executable}" {audit_script}'
+    # print(f"\n[INFO] 正在检查文件完整性... (Auditing files)")
+    # if not run_command(audit_cmd, "清理无效PDF文件"):
+    #      print(f"[WARN] 清理步骤失败，将继续执行...")
 
     # 4. Run Pipeline or Web Dashboard
     main_script = os.path.join("src", "main.py")

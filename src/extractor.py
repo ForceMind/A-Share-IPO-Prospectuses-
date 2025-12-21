@@ -4,14 +4,12 @@ import logging
 import pandas as pd
 import os
 
-# Disable OCR completely as requested
-HAS_OCR = False
-# try:
-#     import pytesseract
-#     from PIL import Image
-#     HAS_OCR = True
-# except ImportError:
-#     HAS_OCR = False
+try:
+    import pytesseract
+    from PIL import Image
+    HAS_OCR = True
+except ImportError:
+    HAS_OCR = False
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +26,9 @@ class ProspectusExtractor:
         try:
             import os
             
+            # Using pdfplumber to open the file.
+            # Some PDFs might have restrictions. If extract_text fails for all pages, 
+            # we might need to consider if it's a scanned PDF or has permissions issues.
             with pdfplumber.open(pdf_path) as pdf:
                 # 0. Check if PDF is text-searchable
                 has_text_content = False
@@ -39,7 +40,8 @@ class ProspectusExtractor:
                         break
                 
                 if not has_text_content:
-                    logger.warning(f"文件似乎是纯图片/扫描件 (File: {os.path.basename(pdf_path)})")
+                    logger.warning(f"文件似乎是纯图片/扫描件或有权限限制 (File: {os.path.basename(pdf_path)})")
+                    # Even if no text, try to locate pages using image features or just return scanned_pdf
                     return [{'note': '扫描件/无法提取文本，需人工处理', 'status': 'scanned_pdf'}]
 
                 # 1. Locate target pages
@@ -48,8 +50,20 @@ class ProspectusExtractor:
                 
                 if not target_pages:
                     logger.warning(f"未定位到分红章节: {pdf_path}")
-                    # Distinguish between no keywords vs no relevant section
-                    return [{'note': '可提取文本，但未找到分红章节关键字', 'status': 'no_section_found'}]
+                    # Broad search as fallback: look for ANY page with "201" and "派发"
+                    fallback_pages = []
+                    for i in range(min(len(pdf.pages), 500)): # Cap at 500 pages
+                        try:
+                            text = pdf.pages[i].extract_text()
+                            if text and "201" in text and "派发" in text:
+                                fallback_pages.append(i)
+                        except: pass
+                    
+                    if fallback_pages:
+                         target_pages = fallback_pages[:5]
+                         logger.info(f"使用备选搜索逻辑定位到页面: {target_pages}")
+                    else:
+                        return [{'note': '可提取文本，但未找到分红章节关键字', 'status': 'no_section_found'}]
                 
                 logger.info(f"定位到目标页面: {target_pages} (File: {os.path.basename(pdf_path)})")
 
@@ -113,8 +127,12 @@ class ProspectusExtractor:
             return ""
         try:
             # High resolution for better OCR
+            # Some PDFs have very small text
             im = page.to_image(resolution=300)
-            text = pytesseract.image_to_string(im.original, lang='chi_sim+eng')
+            # Use custom config for Tesseract to handle financial numbers better
+            # --oem 1 (LSTM), --psm 6 (Assume a single uniform block of text)
+            custom_config = r'--oem 1 --psm 6'
+            text = pytesseract.image_to_string(im.original, lang='chi_sim+eng', config=custom_config)
             return text
         except Exception as e:
             # Suppress noisy tesseract not found errors if we know it might fail
@@ -127,25 +145,28 @@ class ProspectusExtractor:
     def _locate_target_pages(self, pdf):
         scores = {}
         total_pages = len(pdf.pages)
-        # Scan from page 5 to 90%
-        # Important: Many prospectus have "Major Financial Indicators" in pages 10-30
+        # Scan from page 5 to 98%
         start_page = 5 
-        end_page = max(total_pages - 10, int(total_pages * 0.95))
+        end_page = max(total_pages - 2, int(total_pages * 0.99))
 
-        # Heuristic: Check if this looks like a scanned PDF (first few checked pages have no text)
+        # Heuristic: Check if this looks like a scanned PDF
         is_scanned_pdf = False
-        if HAS_OCR:
-            empty_pages_count = 0
-            check_sample = range(start_page, min(start_page + 10, end_page))
-            for i in check_sample:
+        # Even if HAS_OCR is False, we check if text extraction works
+        empty_pages_count = 0
+        check_sample_indices = list(range(start_page, min(start_page + 10, end_page)))
+        if check_sample_indices:
+            for i in check_sample_indices:
                 if not pdf.pages[i].extract_text():
                     empty_pages_count += 1
-            if len(check_sample) > 0 and empty_pages_count / len(check_sample) > 0.8:
+            if empty_pages_count / len(check_sample_indices) > 0.8:
                 is_scanned_pdf = True
-                logger.info("检测到可能是扫描版/纯图片PDF，启用OCR搜索模式 (速度较慢)...")
+                if HAS_OCR:
+                    logger.info("检测到可能是扫描版/纯图片PDF，启用OCR搜索模式...")
+                else:
+                    logger.warning("检测到可能是扫描版/纯图片PDF，但未启用OCR，可能无法定位章节")
 
         # In OCR mode, we increase step to avoid taking forever
-        step = 5 if is_scanned_pdf else 1
+        step = 5 if (is_scanned_pdf and HAS_OCR) else 1
 
         for i in range(start_page, end_page, step):
             try:
@@ -153,7 +174,7 @@ class ProspectusExtractor:
                 text = page.extract_text()
                 
                 # Fallback to OCR if text is missing and we suspect scanned PDF
-                if (not text or len(text.strip()) < 10) and is_scanned_pdf:
+                if (not text or len(text.strip()) < 10) and is_scanned_pdf and HAS_OCR:
                     text = self._ocr_page(page)
 
                 if not text:
@@ -175,7 +196,7 @@ class ProspectusExtractor:
                 if self.year_pattern.search(text):
                     score += 10
                 else:
-                    score -= 10 
+                    score -= 5
 
                 for cw in self.context_positive:
                     if cw in text:
@@ -188,24 +209,32 @@ class ProspectusExtractor:
                 lines = text.split('\n')
                 for line in lines:
                     line = line.strip()
-                    # Check for section titles like "九、股利分配情况"
+                    # Check for section titles
                     if any(kw in line for kw in self.keywords):
-                        if len(line) < 40 and (line.startswith('十') or line.startswith('九') or line.startswith('（') or line[0].isdigit()):
-                            score += 25
+                        if len(line) < 60 and (
+                            line.startswith('十') or 
+                            line.startswith('九') or 
+                            line.startswith('八') or 
+                            line.startswith('七') or 
+                            line.startswith('（') or 
+                            line[0].isdigit() or
+                            re.match(r'^[一二三四五六七八九十]、', line)
+                        ):
+                            score += 30
                         if '......' in line: 
                             score -= 50 # TOC
                         if '政策' in line or '规划' in line or '原则' in line:
-                            score -= 10
+                            score -= 5
 
-                if score > 15:
+                if score > 8:
                     scores[i] = score
 
             except Exception:
                 continue
         
-        # Return top 5 candidates now, to catch both Summary and Detailed sections
+        # Return top 15 candidates
         sorted_pages = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-        return [p[0] for p in sorted_pages[:5]]
+        return [p[0] for p in sorted_pages[:15]]
 
     def _process_tables(self, tables, page_num):
         extracted_data = []
@@ -213,11 +242,17 @@ class ProspectusExtractor:
             return []
 
         for i, table in enumerate(tables):
-            table_str = str(table)
             # Pre-filter table: must contain keywords to be relevant?
-            # Not necessarily, sometimes the header is outside.
-            # But usually it contains "分红" or "金额" or years.
+            table_str = str(table)
+            table_content_str = table_str.replace('\n', '')
             
+            # Helper to detect global unit in table
+            global_unit = 1.0
+            if '万元' in table_content_str:
+                global_unit = 1.0
+            elif '亿元' in table_content_str:
+                global_unit = 10000.0
+
             # Strategy 1: Vertical (Header has Years)
             header_year_map = {} 
             header_row_idx = -1
@@ -244,18 +279,24 @@ class ProspectusExtractor:
                     row = table[r_idx]
                     row_text = ''.join([str(c) for c in row if c])
                     
-                    if '分红' in row_text or '股利' in row_text or '派发' in row_text:
+                    # Relaxed keywords check for the row
+                    if any(kw in row_text for kw in ['分红', '股利', '派发', '现金', '利润分配']):
                         for col_idx, year in header_year_map.items():
                             if col_idx < len(row):
                                 cell_val = row[col_idx]
                                 amount = self._parse_amount(cell_val)
                                 if amount is not None:
-                                    extracted_data.append({
-                                        'year': year,
-                                        'amount': amount,
-                                        'page': page_num + 1,
-                                        'type': 'table_vertical'
-                                    })
+                                    # If unit is 亿元, adjust
+                                    if global_unit > 1.0:
+                                        amount = amount * global_unit
+                                    
+                                    if amount > 10: 
+                                        extracted_data.append({
+                                            'year': year,
+                                            'amount': amount,
+                                            'page': page_num + 1,
+                                            'type': 'table_vertical'
+                                        })
             
             # Strategy 2: Horizontal (Year in Row)
             for row in table:
@@ -270,12 +311,9 @@ class ProspectusExtractor:
                 
                 year = years[0] # Take the first found year in the row
 
-                # Check keywords again, but relax it if "Amount" column has "Cash Dividend" implied
-                # For 605180, row contains "2017年股东会" and "向公司股东分配现金股利 8,000万元"
-                # "现金股利" is a keyword.
-                
+                # Check keywords again
                 has_keyword = False
-                if any(kw in row_text for kw in ['分红', '股利', '派发', '现金']):
+                if any(kw in row_text for kw in ['分红', '股利', '派发', '现金', '利润分配']):
                     has_keyword = True
                 
                 if not has_keyword:
@@ -283,8 +321,7 @@ class ProspectusExtractor:
                 
                 amounts = []
                 for cell in row_clean:
-                    # Enhanced extraction for mixed text cells like "分配现金股利\n8,000万元"
-                    # Try regex on the cell content
+                    # Enhanced extraction for mixed text cells
                     matches = re.findall(r'(\d{1,3}(,\d{3})*(\.\d+)?)\s*(万?元|亿元)', cell)
                     if matches:
                         for amt_str, _, _, unit in matches:
@@ -298,18 +335,23 @@ class ProspectusExtractor:
                                 else:
                                     final_val = val / 10000
                                 
-                                # Ignore if it looks like the year itself (e.g. 2017)
-                                if 2010 <= final_val <= 2030 and final_val == float(year):
+                                if 2010 <= final_val <= 2030 and abs(final_val - float(year)) < 0.1:
                                     continue
                                     
                                 if final_val > 0:
                                     amounts.append(final_val)
                             except: pass
-                    else:
-                        # Fallback to strict parse
+                    
+                    # Fallback: Parse number without explicit unit in cell
+                    if not matches:
                         amt = self._parse_amount(cell)
                         if amt is not None:
                             if 2010 <= amt <= 2030: continue
+                            
+                            # Apply global unit if detected
+                            if global_unit > 1.0:
+                                amt = amt * global_unit
+                                
                             amounts.append(amt)
                 
                 if amounts:
@@ -361,35 +403,77 @@ class ProspectusExtractor:
         
         for i, line in enumerate(lines):
             # 1. Standard Pattern: Same line has Year and Amount
-            if ('分红' in line or '派发' in line) and self.year_pattern.search(line):
+            if ('分红' in line or '派发' in line or '利润分配' in line) and self.year_pattern.search(line):
                 year = self.year_pattern.search(line).group()
                 # Pattern: 1000.00万元
-                matches = re.findall(r'(\d{1,3}(,\d{3})*(\.\d+)?)\s*(万?元)', line)
+                matches = re.findall(r'(\d{1,3}(,\d{3})*(\.\d+)?)\s*(万?元|亿元)', line)
                 if matches:
                     for m in matches:
                         amt_str = m[0].replace(',', '')
                         unit = m[3]
                         try:
-                            val = float(amt_str)
-                            if '万' not in unit: 
-                                val = val / 10000
-                            results.append({
-                                'year': year,
-                                'amount': val,
-                                'page': page_num + 1,
-                                'type': 'text'
-                            })
+                            val = float(amt_str.replace(',', ''))
+                            final_val = val
+                            if '亿' in unit:
+                                final_val = val * 10000
+                            elif '万' not in unit: 
+                                final_val = val / 10000
+                            
+                            if final_val > 1:
+                                results.append({
+                                    'year': year,
+                                    'amount': final_val,
+                                    'page': page_num + 1,
+                                    'type': 'text'
+                                })
                         except:
                             pass
             
-            # 2. Heuristic Pattern: "Cash Dividend ... 3200.00" without year, infer from context or header
-            elif ('现金分红' in line or '分红金额' in line) and not self.year_pattern.search(line):
-                # Check for amount
-                matches = re.findall(r'(\d{1,3}(,\d{3})*(\.\d+)?)\s*(万?元)?', line)
+            # 2. Paragraph/Heading Pattern: Year is in a separate line (header), amount is in the paragraph below
+            # Example: 002962
+            # （二）2017年
+            # ... 派发现金股利14,000.00万元 ...
+            # Look for line that is JUST a year or year with small prefix
+            clean_line = line.strip()
+            # Relax length and pattern to catch headers like "（二）2017年"
+            if ('201' in clean_line or '202' in clean_line) and len(clean_line) < 30:
+                year_match = self.year_pattern.search(clean_line)
+                if year_match:
+                    year = year_match.group()
+                    # Look ahead up to 15 lines for amount keywords
+                    for j in range(1, 16):
+                        if i + j < len(lines):
+                            next_line = lines[i + j]
+                            # Broaden keywords for descriptive paragraphs
+                            if any(kw in next_line for kw in ['派发', '分红', '分配', '股利', '利润分配']):
+                                amt_matches = re.findall(r'(\d{1,3}(,\d{3})*(\.\d+)?)\s*(万?元|亿元)', next_line)
+                                if amt_matches:
+                                    for m in amt_matches:
+                                        try:
+                                            amt_val = float(m[0].replace(',', ''))
+                                            unit = m[3]
+                                            if '亿' in unit: amt_val *= 10000
+                                            elif '万' not in unit: amt_val /= 10000
+                                            
+                                            if amt_val > 1:
+                                                results.append({
+                                                    'year': year,
+                                                    'amount': amt_val,
+                                                    'page': page_num + 1,
+                                                    'type': 'text_heading_paragraph'
+                                                })
+                                        except: pass
+                                    break 
+
+            # 3. Heuristic Pattern: "Cash Dividend ... 3200.00" without year in line, infer from context
+            elif ('现金分红' in line or '分红金额' in line or '利润分配' in line or '股利分配' in line) and not self.year_pattern.search(line):
+                # Check for amount with optional unit
+                matches = re.findall(r'(\d{1,3}(,\d{3})*(\.\d+)?)\s*(万?元|亿元)?', line)
                 valid_matches = []
                 for m in matches:
                     try:
                         val = float(m[0].replace(',', ''))
+                        # Heuristic: if it's a raw number > 100, might be an amount
                         if val > 100: 
                             valid_matches.append(val)
                     except: pass
@@ -398,48 +482,42 @@ class ProspectusExtractor:
                     amount = max(valid_matches)
                     
                     found_years = [] 
-                    for offset in range(1, 25): # Look up to 25 lines back
+                    # Look back more lines (up to 50) to catch distant headers
+                    for offset in range(1, 50): 
                         if i - offset >= 0:
                             prev_line = lines[i - offset]
                             yms = self.year_pattern.findall(prev_line)
                             if yms:
                                 found_years = [y for y in yms if 2010 <= int(y) <= 2030]
-                                break
+                                if found_years:
+                                    break
                     
                     if found_years:
-                        # Column logic
-                        clean_line = line
-                        for kw in ['现金分红', '分红金额', '（万元）', '(万元)', '元']:
-                            clean_line = clean_line.replace(kw, '')
-                        cols = clean_line.split()
-                        data_cols = [c for c in cols if re.match(r'^[\d,\.\-]+$', c)]
-                        year = found_years[0] 
-                        amt_idx = -1
-                        for idx, c in enumerate(data_cols):
-                            if str(int(amount)) in c.replace(',', ''):
-                                amt_idx = idx
-                                break
-                        if amt_idx != -1 and len(found_years) >= len(data_cols):
-                             if amt_idx < len(found_years):
-                                 year = found_years[amt_idx]
-                        
+                        # Normalize amount
                         final_amt = amount
-                        if final_amt > 200000:
+                        # If unit is missing, check context
+                        if '亿元' in line:
+                            final_amt = final_amt * 10000
+                        elif '万元' in line:
+                             pass
+                        elif final_amt > 200000:
                             final_amt = final_amt / 10000
-                            
+                        elif 100 < final_amt < 100000:
+                            # Assume it's already in 万元 if it's in this range and no unit
+                            pass 
+
                         results.append({
-                            'year': year,
+                            'year': found_years[0],
                             'amount': final_amt,
                             'page': page_num + 1,
                             'type': 'text_context_heuristic'
                         })
 
-            # 3. New Pattern: Long text description
+            # 4. Pattern: "Year ... Distribute ... Amount" (Long description)
             if ('分红' in line or '分配' in line) and ('万元' in line or '亿元' in line):
                  year_match = self.year_pattern.search(line)
                  if year_match:
                      year = year_match.group()
-                     # Regex for amount + unit, allowing space
                      amount_matches = re.findall(r'(\d{1,3}(,\d{3})*(\.\d+)?)\s*(万?元|亿元)', line)
                      for amt_str, _, _, unit in amount_matches:
                          try:

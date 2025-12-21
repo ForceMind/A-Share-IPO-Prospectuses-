@@ -152,16 +152,22 @@ class Downloader:
                 
                 exclude_keywords = ["摘要", "更正", "提示", "发行结果", "网上路演", "意见", "法律", "反馈", 
                                     "H股", "增发", "配股", "可转债", "转换公司债券", "保荐书", "审核", "评价", "承诺",
-                                    "持续督导", "半年", "季度", "年度", "律师工作报告", "上市公告书"]
+                                    "持续督导", "半年", "季度", "年度", "律师工作报告"]
+                                    
+                # Note: "上市公告书" removed from hard exclude to allow fallback logic in loop
                 
                 for ann in announcements:
                     title = ann['announcementTitle']
                     
+                    # Custom filter logic
                     if any(kw in title for kw in exclude_keywords):
                         continue
+                        
+                    # Also exclude "上市公告书" if it's just "上市公告书提示性公告"
+                    if "上市公告书" in title and ("提示" in title or "摘要" in title):
+                        continue
                     
-                    if "招股说明书" in title or "招股意向书" in title:
-                        # Prioritize exact matches or "Initial" ones
+                    if "招股说明书" in title or "招股意向书" in title or "上市公告书" in title or ("吸收合并" in title and "报告书" in title):
                         candidates.append(ann)
                 
                 # If we found candidates > 0, we can stop?
@@ -304,8 +310,9 @@ class Downloader:
             if '申报稿' in t: score -= 10
             
             # Reduce score for "Appendices" or "Summaries" if they sneaked in
-            if '附录' in t: score -= 300  # Heavily penalize appendix
-            if '摘要' in t: score -= 50
+            if '附录' in t or '附件' in t: score -= 500  # Heavily penalize appendix
+            if '摘要' in t: score -= 100
+            if '提示' in t: score -= 100
             return score
 
         announcements.sort(key=get_score, reverse=True)
