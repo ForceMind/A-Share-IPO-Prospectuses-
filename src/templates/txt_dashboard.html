@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>IPO 招股书处理仪表盘</title>
+    <title>TXT 招股书提取控制台</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         .log-container {
@@ -22,9 +22,12 @@
 </head>
 <body class="bg-gray-100 font-sans">
     <div class="container mx-auto px-4 py-8">
-        <header class="mb-8">
-            <h1 class="text-3xl font-bold text-gray-800">IPO 招股书分红提取控制台</h1>
-            <p class="text-gray-600">实时监控下载与解析进度</p>
+        <header class="mb-8 flex justify-between items-center">
+            <div>
+                <h1 class="text-3xl font-bold text-gray-800">TXT 招股书提取控制台</h1>
+                <p class="text-gray-600">管理 TXT 文件的多进程提取任务与 Excel 导出</p>
+            </div>
+            <a href="/" class="text-blue-600 hover:underline">返回 PDF 仪表盘</a>
         </header>
 
         <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
@@ -52,8 +55,7 @@
                 <div class="flex space-x-8 text-sm">
                     <div>成功: <span id="count-success" class="text-green-600 font-bold">0</span></div>
                     <div>失败: <span id="count-failed" class="text-red-600 font-bold">0</span></div>
-                    <div>下载并发: <span id="current-download-concurrency" class="text-blue-600 font-bold">4</span></div>
-                    <div>提取并发: <span id="current-extract-concurrency" class="text-blue-600 font-bold">4</span></div>
+                    <div>并发数: <span id="current-concurrency" class="text-blue-600 font-bold">4</span></div>
                 </div>
             </div>
         </div>
@@ -65,33 +67,18 @@
                     <h2 class="text-lg font-semibold mb-4 text-gray-700">控制面板</h2>
                     <div class="space-y-4">
                         <button id="btn-start" class="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded transition">
-                            开始任务
-                        </button>
-                        <button id="btn-audit" class="w-full bg-yellow-600 hover:bg-yellow-700 text-white font-bold py-2 px-4 rounded transition">
-                            校验文件
-                        </button>
-                        <button id="btn-verify" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded transition">
-                            数据核验
+                            开始 TXT 提取
                         </button>
                         <button id="btn-stop" class="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded transition">
                             停止任务
                         </button>
                         <hr>
                         <div>
-                            <label class="block text-sm font-medium text-gray-700 mb-1">下载并发数</label>
-                            <input type="range" id="input-download-concurrency" min="1" max="50" value="4" class="w-full">
+                            <label class="block text-sm font-medium text-gray-700 mb-1">并发数</label>
+                            <input type="range" id="input-concurrency" min="1" max="50" value="4" class="w-full">
                             <div class="flex justify-between text-xs text-gray-500">
                                 <span>1</span>
-                                <span id="download-range-val">4</span>
-                                <span>50</span>
-                            </div>
-                        </div>
-                        <div>
-                            <label class="block text-sm font-medium text-gray-700 mb-1">提取并发数</label>
-                            <input type="range" id="input-extract-concurrency" min="1" max="50" value="4" class="w-full">
-                            <div class="flex justify-between text-xs text-gray-500">
-                                <span>1</span>
-                                <span id="extract-range-val">4</span>
+                                <span id="concurrency-range-val">4</span>
                                 <span>50</span>
                             </div>
                         </div>
@@ -107,7 +94,7 @@
                         <button id="btn-clear-logs" class="text-xs text-blue-600 hover:underline">清空</button>
                     </div>
                     <div id="log-window" class="log-container">
-                        <div>[系统] 仪表盘已就绪，等待指令...</div>
+                        <div>[系统] TXT 仪表盘已就绪，等待指令...</div>
                     </div>
                 </div>
             </div>
@@ -117,13 +104,9 @@
     <script>
         const btnStart = document.getElementById('btn-start');
         const btnStop = document.getElementById('btn-stop');
-        const btnAudit = document.getElementById('btn-audit');
-        const btnVerify = document.getElementById('btn-verify'); // New button
         const btnClearLogs = document.getElementById('btn-clear-logs');
-        const inputDownloadConcurrency = document.getElementById('input-download-concurrency');
-        const inputExtractConcurrency = document.getElementById('input-extract-concurrency');
-        const downloadRangeVal = document.getElementById('download-range-val');
-        const extractRangeVal = document.getElementById('extract-range-val');
+        const inputConcurrency = document.getElementById('input-concurrency');
+        const concurrencyRangeVal = document.getElementById('concurrency-range-val');
         const logWindow = document.getElementById('log-window');
         
         const statusBadge = document.getElementById('status-badge');
@@ -133,12 +116,11 @@
         const progressBar = document.getElementById('progress-bar');
         const countSuccess = document.getElementById('count-success');
         const countFailed = document.getElementById('count-failed');
-        const currentDownloadConcurrencyDisplay = document.getElementById('current-download-concurrency');
-        const currentExtractConcurrencyDisplay = document.getElementById('current-extract-concurrency');
+        const currentConcurrencyDisplay = document.getElementById('current-concurrency');
 
         // WebSocket for logs
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const ws = new WebSocket(`${protocol}//${window.location.host}/ws/logs`);
+        const ws = new WebSocket(`${protocol}//${window.location.host}/ws/txt/logs`);
         
         ws.onmessage = (event) => {
             const line = document.createElement('div');
@@ -150,7 +132,7 @@
         // Polling for status
         async function updateStatus() {
             try {
-                const response = await fetch('/api/status');
+                const response = await fetch('/api/txt/status');
                 const data = await response.json();
                 
                 // Update UI
@@ -170,8 +152,7 @@
                 elapsedTime.textContent = data.elapsed_time;
                 countSuccess.textContent = data.completed_tasks;
                 countFailed.textContent = data.failed_tasks;
-                currentDownloadConcurrencyDisplay.textContent = data.download_concurrency;
-                currentExtractConcurrencyDisplay.textContent = data.extract_concurrency;
+                currentConcurrencyDisplay.textContent = data.concurrency;
 
                 const total = data.total_tasks || 0;
                 const completed = data.completed_tasks + data.failed_tasks;
@@ -189,51 +170,27 @@
 
         // Event Listeners
         btnStart.onclick = async () => {
-            await fetch('/api/start?action=all', { method: 'POST' });
+            await fetch('/api/txt/start', { method: 'POST' });
             const line = document.createElement('div');
             line.textContent = '[系统] 已发送启动指令...';
             line.style.color = '#ffff00';
             logWindow.appendChild(line);
         };
 
-        btnAudit.onclick = async () => {
-            await fetch('/api/start?action=audit', { method: 'POST' });
-            const line = document.createElement('div');
-            line.textContent = '[系统] 已发送文件校验指令...';
-            line.style.color = '#ffff00';
-            logWindow.appendChild(line);
-        };
-
-        btnVerify.onclick = async () => {
-            await fetch('/api/verify', { method: 'POST' });
-            const line = document.createElement('div');
-            line.textContent = '[系统] 已发送数据核验指令...';
-            line.style.color = '#ffff00';
-            logWindow.appendChild(line);
-        };
-
         btnStop.onclick = async () => {
-            await fetch('/api/stop', { method: 'POST' });
+            await fetch('/api/txt/stop', { method: 'POST' });
         };
 
         btnClearLogs.onclick = () => {
             logWindow.innerHTML = '';
         };
 
-        inputDownloadConcurrency.oninput = () => {
-            downloadRangeVal.textContent = inputDownloadConcurrency.value;
+        inputConcurrency.oninput = () => {
+            concurrencyRangeVal.textContent = inputConcurrency.value;
         };
 
-        inputDownloadConcurrency.onchange = async () => {
-            await fetch(`/api/config?download_concurrency=${inputDownloadConcurrency.value}`, { method: 'POST' });
-        };
-
-        inputExtractConcurrency.oninput = () => {
-            extractRangeVal.textContent = inputExtractConcurrency.value;
-        };
-
-        inputExtractConcurrency.onchange = async () => {
-            await fetch(`/api/config?extract_concurrency=${inputExtractConcurrency.value}`, { method: 'POST' });
+        inputConcurrency.onchange = async () => {
+            await fetch(`/api/txt/config?concurrency=${inputConcurrency.value}`, { method: 'POST' });
         };
     </script>
 </body>

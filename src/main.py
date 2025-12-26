@@ -144,6 +144,12 @@ def run_pipeline(action='all', limit=None, csv_file='stock_list.csv', parallel=F
             save_results(all_dividends, processed_files)
             generate_report(stock_list_path)
             
+            # 3. Verification Phase (Auto-trigger after extraction)
+            logger.info("=== 开始自动化校验阶段 ===")
+            from src.verifier import DataVerifier
+            verifier = DataVerifier()
+            verifier.verify_all()
+            
     logger.info("任务完成")
 
 if __name__ == '__main__':

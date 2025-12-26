@@ -249,6 +249,16 @@ class TaskManager:
                      
                 logging.info("Step 2/2: Extraction phase completed.")
 
+            # 3. Verify if needed
+            if action in ["all", "extract", "verify"] and not self.stop_event.is_set():
+                self.status["current_action"] = "Verifying"
+                logging.info("Step 3: Starting data verification...")
+                from src.verifier import DataVerifier
+                verifier = DataVerifier()
+                # Use extract_concurrency for verification/backfilling
+                verifier.verify_all(concurrency=self.status.get("extract_concurrency", 4))
+                logging.info("Step 3: Verification completed.")
+
             logging.info("Pipeline finished successfully.")
         except AttributeError as e:
              logging.error(f"Pipeline attribute error: {e}. Check if methods like _run_extraction are defined.")

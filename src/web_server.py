@@ -13,6 +13,7 @@ import uvicorn
 import os
 import asyncio
 from src.task_manager import get_task_manager
+from src.txt_process_manager import get_txt_manager
 
 # Remove global instantiation to prevent multiprocessing recursive bomb
 # task_manager = get_task_manager()
@@ -27,19 +28,42 @@ templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 async def index(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
+@app.get("/txt_dashboard", response_class=HTMLResponse)
+async def txt_dashboard(request: Request):
+    return templates.TemplateResponse("txt_dashboard.html", {"request": request})
+
 @app.get("/api/status")
 async def get_status():
     return get_task_manager().get_status()
+
+@app.get("/api/txt/status")
+async def get_txt_status():
+    return get_txt_manager().get_status()
 
 @app.post("/api/start")
 async def start_tasks(action: str = "all", limit: int = None):
     get_task_manager().start_tasks(action=action, limit=limit)
     return {"status": "started"}
 
+@app.post("/api/txt/start")
+async def start_txt_tasks(limit: int = None):
+    get_txt_manager().start_tasks(limit=limit)
+    return {"status": "started"}
+
 @app.post("/api/stop")
 async def stop_tasks():
     get_task_manager().stop_tasks()
     return {"status": "stopping"}
+
+@app.post("/api/txt/stop")
+async def stop_txt_tasks():
+    get_txt_manager().stop_tasks()
+    return {"status": "stopping"}
+
+@app.post("/api/verify")
+async def verify_data():
+    get_task_manager().start_tasks(action="verify")
+    return {"status": "verification_started"}
 
 @app.post("/api/config")
 async def update_config(download_concurrency: int = None, extract_concurrency: int = None):
@@ -50,12 +74,36 @@ async def update_config(download_concurrency: int = None, extract_concurrency: i
         "extract_concurrency": get_task_manager().status.get("extract_concurrency")
     }
 
+@app.post("/api/txt/config")
+async def update_txt_config(concurrency: int = None):
+    if concurrency:
+        get_txt_manager().set_concurrency(concurrency)
+    return {
+        "status": "updated",
+        "concurrency": get_txt_manager().status.get("concurrency")
+    }
+
 @app.websocket("/ws/logs")
 async def websocket_logs(websocket: WebSocket):
     await websocket.accept()
     try:
         while True:
             logs = get_task_manager().get_logs()
+            if logs:
+                for log in logs:
+                    await websocket.send_text(log)
+            await asyncio.sleep(0.5)
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        print(f"WebSocket error: {e}")
+
+@app.websocket("/ws/txt/logs")
+async def websocket_txt_logs(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        while True:
+            logs = get_txt_manager().get_logs()
             if logs:
                 for log in logs:
                     await websocket.send_text(log)

@@ -1,69 +1,59 @@
-# A股招股书分红数据自动化提取工具
+# A-Share IPO Prospectus Dividend Extractor
 
-本项目旨在自动化提取 2019-2023 年 A 股上市公司招股说明书中的“上市前三年”分红数据。
+This project automatically extracts dividend information from A-Share IPO prospectuses (TXT format). It includes tools for downloading prospectuses, extracting dividend data, verifying results, and serving a web dashboard.
 
-## 功能特性
-*   **自动化爬虫**: 自动从巨潮资讯网下载招股说明书 PDF。
-*   **智能解析**: 结合关键词定位、表格提取和正则匹配，从长达数百页的 PDF 中精确定位分红数据。
-*   **数据清洗**: 自动标准化金额单位（统一为万元），处理跨页表格。
-*   **结果汇总**: 输出 Excel 报表，包含公司代码、名称、年度、分红金额及来源页码。
+## Project Structure
 
-## 环境要求
-*   Python 3.8+
-*   依赖库: `requests`, `pandas`, `pdfplumber`, `openpyxl`, `tqdm`
+*   `src/`: Source code for the application.
+    *   `txt_extractor.py`: Core logic for parsing TXT files and regex matching.
+    *   `txt_process_manager.py`: Manages multi-process extraction tasks.
+    *   `enrich_data.py`: Fetches missing stock codes/names from Cninfo (Juchao) or EastMoney.
+    *   `get_stock_list.py`: Fetches A-Share stock list.
+    *   `web_server.py`: Flask-based web dashboard.
+*   `data/`: Data storage (TXT files, Excel outputs).
+*   `scripts/`: Utility scripts for debugging and maintenance.
+*   `logs/`: Application logs.
 
-## 快速开始
+## Setup
 
-### 1. 安装依赖
+1.  **Install Dependencies:**
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+2.  **Prepare Data:**
+    Ensure your TXT files are located in `data/TXT/`.
+
+## Usage
+
+### 1. Extract Dividend Data
+To run the main extraction process:
 ```bash
-python -m pip install -r requirements.txt
+python src/main.py
 ```
-
-### 2. 获取股票列表
-首先获取 2019-2023 年上市的公司列表：
+Or use the launcher:
 ```bash
-python src/get_stock_list.py
+python src/launcher.py
 ```
-这将在 `data/` 目录下生成 `stock_list.csv`。
 
-### 3. 运行全流程 (下载 + 解析)
+### 2. Enrich Missing Data (Fix "Unknowns")
+If the extraction results contain "Unknown" stock codes or names, run the enrichment script to query external sources (Cninfo):
 ```bash
-python src/main.py --action all
+python src/enrich_data.py
 ```
-程序会自动下载 PDF 到 `data/pdfs/`，并将解析结果保存至 `data/output/dividends_summary.xlsx`。
 
-### 仅下载
+### 3. Web Dashboard
+Start the web interface to view logs and status:
 ```bash
-python src/main.py --action download
+python src/web_server.py
 ```
+Access at `http://localhost:5000`.
 
-### 仅解析 (需已有 PDF)
-```bash
-python src/main.py --action extract
-```
+## Troubleshooting
 
-### 运行测试 (使用测试列表)
-```bash
-python src/main.py --csv stock_list_test.csv
-```
+*   **Encoding Issues:** The extractor handles UTF-8 and GBK encodings. If you see mojibake (garbled text), try running `src/enrich_data.py` to fix file metadata.
+*   **Missing Stock Info:** Ensure `stock_list.csv` exists or run `src/enrich_data.py`.
 
-## 目录结构
-```
-project_root/
-├── data/
-│   ├── pdfs/          # 下载的 PDF 文件
-│   ├── output/        # 结果 Excel
-│   └── stock_list.csv # 股票列表
-├── logs/              # 运行日志
-├── src/
-│   ├── config.py      # 配置项
-│   ├── get_stock_list.py # 获取列表脚本
-│   ├── downloader.py  # 爬虫模块
-│   ├── extractor.py   # PDF 解析模块
-│   └── main.py        # 主入口
-└── requirements.txt
-```
+## License
 
-## 常见问题
-*   **下载失败**: 请检查网络连接，或增加 `src/config.py` 中的重试次数。
-*   **解析为空**: 招股书格式差异巨大，部分扫描件或非标准表格可能无法解析，建议查看 `dividends_summary.xlsx` 中的 `note` 列，并人工复核。
+[License Name]

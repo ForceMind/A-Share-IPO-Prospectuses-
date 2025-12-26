@@ -10,7 +10,7 @@ def save_results(all_dividends, processed_files=None):
     if all_dividends:
         df = pd.DataFrame(all_dividends)
         # Ensure 'note' is included in columns, and others like 'status' if we added it
-        cols = ['code', 'name', 'year', 'amount', 'page', 'source_file', 'note']
+        cols = ['code', 'name', 'year', 'amount', 'page', 'method', 'context', 'source_file', 'note']
         
         # Add columns if they don't exist
         for c in cols:
