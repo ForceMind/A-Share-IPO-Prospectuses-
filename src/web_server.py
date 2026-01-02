@@ -75,12 +75,15 @@ async def update_config(download_concurrency: int = None, extract_concurrency: i
     }
 
 @app.post("/api/txt/config")
-async def update_txt_config(concurrency: int = None):
+async def update_txt_config(concurrency: int = None, cost_limit: float = None):
     if concurrency:
         get_txt_manager().set_concurrency(concurrency)
+    if cost_limit is not None:
+        get_txt_manager().set_cost_limit(cost_limit)
     return {
         "status": "updated",
-        "concurrency": get_txt_manager().status.get("concurrency")
+        "concurrency": get_txt_manager().status.get("concurrency"),
+        "ai_cost_limit": get_txt_manager().status.get("ai_cost_limit")
     }
 
 @app.websocket("/ws/logs")
@@ -88,9 +91,14 @@ async def websocket_logs(websocket: WebSocket):
     await websocket.accept()
     try:
         while True:
-            logs = get_task_manager().get_logs()
-            if logs:
-                for log in logs:
+            # Pull from both managers
+            logs_pdf = get_task_manager().get_logs()
+            logs_txt = get_txt_manager().get_logs()
+            
+            all_logs = logs_pdf + logs_txt
+            
+            if all_logs:
+                for log in all_logs:
                     await websocket.send_text(log)
             await asyncio.sleep(0.5)
     except WebSocketDisconnect:

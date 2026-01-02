@@ -12,6 +12,11 @@ from src.txt_extractor import TxtExtractor
 from src.config import DATA_DIR
 from src.enrich_data import search_stock_cninfo
 
+try:
+    from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
+except ImportError:
+    from openpyxl.utils.cell import ILLEGAL_CHARACTERS_RE
+
 class TxtProcessManager:
     def __init__(self):
         self.status = {
@@ -22,7 +27,9 @@ class TxtProcessManager:
             "current_action": "Idle",
             "concurrency": 4,
             "start_time": None,
-            "elapsed_time": 0
+            "elapsed_time": 0,
+            "total_ai_cost": 0.0,
+            "ai_cost_limit": 10.0 # Default limit 10.00 CNY
         }
         
         # Web UI Queue (Thread-safe)
@@ -136,6 +143,11 @@ class TxtProcessManager:
             self.status["concurrency"] = max(1, min(concurrency, 50))
             logging.info(f"TXT Extraction Concurrency updated: {self.status['concurrency']}")
 
+    def set_cost_limit(self, limit: float):
+        with self._lock:
+            self.status["ai_cost_limit"] = max(0.0, limit)
+            logging.info(f"AI Cost Limit updated: ¥{self.status['ai_cost_limit']:.4f}")
+
     def start_tasks(self, limit: Optional[int] = None):
         if self.status["is_running"]:
             logging.warning("TXT tasks are already running")
@@ -148,6 +160,7 @@ class TxtProcessManager:
         self.status["start_time"] = time.time()
         self.status["completed_tasks"] = 0
         self.status["failed_tasks"] = 0
+        self.status["total_ai_cost"] = 0.0 # Reset cost for new run? Or keep cumulative? Let's reset.
         
         threading.Thread(target=self._run_extraction, args=(limit,), daemon=True).start()
 
@@ -284,7 +297,7 @@ class TxtProcessManager:
 
             with ProcessPoolExecutor(max_workers=self.status["concurrency"]) as executor:
                 futures = {
-                    executor.submit(_process_txt_worker, f, self.mp_log_queue, self.stock_metadata, api_key): f 
+                    executor.submit(_process_txt_worker, f, self.mp_log_queue, self.stock_metadata, api_key, self.status["ai_cost_limit"], self.status["total_ai_cost"]): f 
                     for f in final_files
                 }
                 
@@ -293,12 +306,20 @@ class TxtProcessManager:
                     
                     for future in done:
                         try:
-                            res_dividends, res_stock_info = future.result()
+                            res_dividends, res_stock_info, cost_incurred = future.result()
                             if res_dividends:
                                 results.extend(res_dividends)
                             if res_stock_info:
                                 stock_info_list.append(res_stock_info)
+                            
+                            self.status["total_ai_cost"] += cost_incurred
                             self.status["completed_tasks"] += 1
+                            
+                            # Incremental Save (Every 1 task as requested, or small batch)
+                            # User asked for "extract one write one", so we save frequently.
+                            # To balance performance, we can save every 1 task since concurrency is low (4).
+                            self._save_to_excel(results, stock_info_list, base_dir)
+                            
                         except Exception as e:
                             logging.error(f"Task failed: {e}")
                             self.status["failed_tasks"] += 1
@@ -326,8 +347,12 @@ class TxtProcessManager:
             dividends = dividends or []
             stock_infos = stock_infos or []
             
-            logging.info(f"Saving to Excel. Dividends count: {len(dividends)}, Stock Info count: {len(stock_infos)}")
+            # logging.info(f"Saving to Excel. Dividends count: {len(dividends)}, Stock Info count: {len(stock_infos)}")
             
+            # Helper to sanitize data for Excel
+            def sanitize_df(df):
+                return df.applymap(lambda x: ILLEGAL_CHARACTERS_RE.sub('', str(x)) if isinstance(x, str) else x)
+
             with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
                 # 1. Stock Info Sheet
                 if stock_infos:
@@ -354,9 +379,12 @@ class TxtProcessManager:
                     target_cols = list(cols_map.values())
                     df_info = df_info[target_cols]
                     
+                    # Sanitize
+                    df_info = sanitize_df(df_info)
+                    
                     df_info.to_excel(writer, sheet_name='Stock List', index=False)
                 else:
-                    logging.warning("No stock info to save. Creating empty Stock List sheet.")
+                    # logging.warning("No stock info to save. Creating empty Stock List sheet.")
                     pd.DataFrame(columns=['Stock Name', 'Stock Code', 'Board', 'Industry', 'IPO Date', 'Full Company Name', 'Source File']).to_excel(writer, sheet_name='Stock List', index=False)
 
                 # 2. Dividends Sheet
@@ -369,7 +397,11 @@ class TxtProcessManager:
                         'dividend_year': 'Dividend Year',
                         'amount_with_unit': 'Dividend Amount',
                         'raw_context': 'Context Source',
-                        'filename': 'Source File'
+                        'filename': 'Source File',
+                        'is_ai': 'Is AI Generated',
+                        'ai_prompt': 'AI Prompt',
+                        'ai_response': 'AI Response',
+                        'ai_cost': 'AI Cost (CNY)'
                     }
                     
                     # Ensure columns
@@ -382,21 +414,44 @@ class TxtProcessManager:
                     target_cols_div = list(cols_map_div.values())
                     df_div = df_div[target_cols_div]
                     
+                    # Sanitize
+                    df_div = sanitize_df(df_div)
+                    
                     df_div.to_excel(writer, sheet_name='Dividends', index=False)
                 else:
-                    logging.warning("No dividends to save. Creating empty Dividends sheet.")
-                    pd.DataFrame(columns=['Stock Name', 'Stock Code', 'Dividend Year', 'Dividend Amount', 'Context Source', 'Source File']).to_excel(writer, sheet_name='Dividends', index=False)
+                    # logging.warning("No dividends to save. Creating empty Dividends sheet.")
+                    pd.DataFrame(columns=['Stock Name', 'Stock Code', 'Dividend Year', 'Dividend Amount', 'Context Source', 'Source File', 'Is AI Generated', 'AI Prompt', 'AI Response', 'AI Cost (CNY)']).to_excel(writer, sheet_name='Dividends', index=False)
             
-            logging.info(f"Results saved to {output_file}")
+            # Add Summary Sheet with Cost
+            pd.DataFrame([{
+                "Total AI Cost (CNY)": self.status.get("total_ai_cost", 0.0),
+                "Cost Limit (CNY)": self.status.get("ai_cost_limit", 0.0),
+                "Total Tasks": self.status.get("total_tasks", 0),
+                "Completed": self.status.get("completed_tasks", 0)
+            }]).to_excel(writer, sheet_name='Summary', index=False)
+            
+            # logging.info(f"Results saved to {output_file}")
+        except PermissionError:
+            logging.warning(f"Could not save to {output_file} because it is open. Data is buffered in memory and will be retried on next save.")
+            # We do NOT clear the results list, so the next successful save will include these records.
+            try:
+                # Optional: Try to save to a temp file just in case the process crashes before next save
+                alt_file = output_file.replace('.xlsx', f'_temp_{int(time.time())}.xlsx')
+                # logging.info(f"Attempting backup save to {alt_file}")
+                # with pd.ExcelWriter(alt_file, engine='openpyxl') as writer:
+                #    ... (Skip complex backup logic to avoid code duplication, memory buffer is safe for now)
+                pass
+            except:
+                pass
         except Exception as e:
             logging.error(f"Failed to save Excel: {e}")
-            import traceback
-            logging.error(traceback.format_exc())
+            # import traceback
+            # logging.error(traceback.format_exc())
 
-def _process_txt_worker(file_path, log_queue, metadata, api_key=None):
+def _process_txt_worker(file_path, log_queue, metadata, api_key=None, cost_limit=0.0, current_cost=0.0):
     """
     Worker function for processing a single TXT file.
-    Returns a tuple: (list_of_dividends, stock_info_dict)
+    Returns a tuple: (list_of_dividends, stock_info_dict, cost_incurred)
     """
     import logging
     
@@ -438,12 +493,18 @@ def _process_txt_worker(file_path, log_queue, metadata, api_key=None):
                 
                 if not content:
                     logger.warning(f"No text extracted from PDF {os.path.basename(file_path)} (Scanned?)")
-                    return [], None
+                    return [], None, 0.0
                     
                 # Use the content for extraction
                 # We need to manually call extract_dividends_enhanced since extract_from_file expects a file path to read
                 use_ai = bool(api_key)
-                dividends = extractor.extract_dividends_enhanced(content, use_ai=use_ai, api_key=api_key)
+                dividends, cost = extractor.extract_dividends_enhanced(
+                    content, 
+                    use_ai=use_ai, 
+                    api_key=api_key,
+                    cost_limit=cost_limit,
+                    current_cost=current_cost
+                )
                 
                 # Construct data dict manually
                 filename = os.path.basename(file_path)
@@ -453,23 +514,30 @@ def _process_txt_worker(file_path, log_queue, metadata, api_key=None):
                 data = {
                     "company_name": company_name,
                     "filename": filename,
-                    "dividends": dividends
+                    "dividends": dividends,
+                    "cost": cost
                 }
                 
             except Exception as e:
                 logger.error(f"Error converting PDF {os.path.basename(file_path)}: {e}")
-                return [], None
+                return [], None, 0.0
         else:
             # Normal TXT processing
             # Pass API Key to extractor
-            data = extractor.extract_from_file(file_path, api_key=api_key)
+            data = extractor.extract_from_file(
+                file_path, 
+                api_key=api_key,
+                cost_limit=cost_limit,
+                current_cost=current_cost
+            )
         
         if not data:
             logger.warning(f"No data extracted from {os.path.basename(file_path)}")
-            return [], None
+            return [], None, 0.0
             
         full_company_name = data['company_name']
         filename = data['filename']
+        cost_incurred = data.get('cost', 0.0)
         
         # Parse Board from path if possible
         # Expected: .../data/TXT/{Board}/{Year}/Filename.txt
@@ -582,7 +650,7 @@ def _process_txt_worker(file_path, log_queue, metadata, api_key=None):
         }
 
         if not data['dividends']:
-            return [], stock_info_record
+            return [], stock_info_record, cost_incurred
             
         results = []
         for div in data['dividends']:
@@ -600,14 +668,18 @@ def _process_txt_worker(file_path, log_queue, metadata, api_key=None):
                 "dividend_year": div.get('year', ''),
                 "amount_with_unit": amount_str,
                 "raw_context": div.get('raw_text', ''),
-                "filename": filename
+                "filename": filename,
+                "is_ai": div.get('is_ai', False),
+                "ai_prompt": div.get('ai_prompt', ''),
+                "ai_response": div.get('ai_response', ''),
+                "ai_cost": div.get('ai_cost', 0.0)
             })
             
-        return results, stock_info_record
+        return results, stock_info_record, cost_incurred
         
     except Exception as e:
         logger.error(f"Error processing {os.path.basename(file_path)}: {e}")
-        return [], None
+        return [], None, 0.0
 
 # Singleton
 _txt_manager_instance = None
