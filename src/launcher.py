@@ -5,17 +5,44 @@ import time
 
 def print_header():
     print("=" * 60)
-    print(" A股招股说明书现金分红一键抓取工具 (并行加速版)")
-    print(" A-Share IPO Prospectus Dividend Extractor")
+    print(" A股招股说明书现金分红一键抓取工具 (Web版)")
     print("=" * 60)
     print("\n本脚本将自动执行以下步骤：")
-    print("1. 检查并安装依赖 (Check Dependencies)")
-    print("2. 获取股票列表 (Fetch Stock List)")
-    print("3. 清理无效文件 (Audit & Clean)")
-    print("4. 并行下载与解析 PDF (Download & Extract)")
-    print("5. 生成状态报告 (Generate Report)")
+    print("1. 检查并安装依赖")
+    print("2. 获取股票列表")
+    print("3. 清理无效文件")
+    print("4. 并行下载与解析 PDF")
+    print("5. 生成状态报告")
     print("\n[提示] 您可以随时按 Ctrl+C 停止脚本，进度会自动保存。")
     print("-" * 60)
+
+    # Check for API Key
+    api_key = os.environ.get("DEEPSEEK_API_KEY")
+    key_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "api_key.txt")
+    
+    # Priority: Env Var > api_key.txt > User Input
+    if not api_key:
+        if os.path.exists(key_path):
+            try:
+                with open(key_path, "r", encoding="utf-8") as f:
+                    content = f.read().strip()
+                    if content and "sk-" in content:
+                        api_key = content
+                        print(f"[INFO] 已自动加载本地 API Key: {key_path}")
+            except:
+                pass
+    
+    if not api_key:
+        print("\n[配置] 这是一个可选步骤。")
+        print("如果您希望使用 AI 增强功能 (提取净利润/现金流)，请输入 DeepSeek API Key。")
+        print("直接按回车可跳过 (将仅使用正则表达式提取，可能不完整)。")
+        user_input = input("请输入 API Key (sk-...): ").strip()
+        if user_input:
+            api_key = user_input
+            os.environ["DEEPSEEK_API_KEY"] = api_key
+            print("[INFO] API Key 已设置 (仅本次运行有效)。")
+        else:
+            print("[INFO] 未输入 Key，将启用纯正则模式。")
 
 def run_command(command, description):
     print(f"\n[INFO] 正在{description}...")
@@ -78,7 +105,7 @@ def main():
     print_header()
 
     # Log Process ID for launcher
-    print(f"[INFO] Launcher PID: {os.getpid()}")
+    print(f"[INFO] 启动器 PID: {os.getpid()}")
 
     # 1. Install Dependencies
     # We assume python is available since this script is running
@@ -111,7 +138,7 @@ def main():
                 # Check modification time
                 mtime = os.path.getmtime(stock_list_path)
                 if time.time() - mtime < 86400: # 24 hours
-                    print(f"\n[INFO] 股票列表已存在且较新，跳过重新获取。 (Using existing stock list)")
+                    print(f"\n[INFO] 股票列表已存在且较新，跳过重新获取。")
                     should_fetch = False
         except:
             pass
@@ -137,11 +164,11 @@ def main():
     web_script = os.path.join("src", "web_server.py")
     
     if "--web" in sys.argv:
-        # Kill existing process on port 8001 to prevent conflicts
-        kill_process_on_port(8001)
+        # Kill existing process on port 3000 to prevent conflicts
+        kill_process_on_port(3000)
 
-        print(f"\n[INFO] 正在启动 Web 仪表盘... (Starting Dashboard)")
-        print(f"[INFO] 请在浏览器中打开: http://127.0.0.1:8001")
+        print(f"\n[INFO] 正在启动 Web 仪表盘...")
+        print(f"[INFO] 请在浏览器中打开: http://127.0.0.1:3000")
         
         # Try to open browser automatically
         import webbrowser
@@ -149,7 +176,7 @@ def main():
         try:
             from threading import Timer
             def open_browser():
-                webbrowser.open("http://127.0.0.1:8001")
+                webbrowser.open("http://127.0.0.1:3000")
             Timer(1.5, open_browser).start()
         except:
             pass
@@ -158,18 +185,18 @@ def main():
         subprocess.run(web_cmd, shell=True)
     else:
         pipeline_cmd = f'"{sys.executable}" {main_script} --action all --parallel'
-        print(f"\n[INFO] 正在启动并行采集流程... (Starting Pipeline)")
+        print(f"\n[INFO] 正在启动并行采集流程...")
         try:
             subprocess.run(pipeline_cmd, shell=True)
         except KeyboardInterrupt:
             pass
 
     print("\n" + "="*60)
-    print(" 任务结束 (Finished)")
+    print(" 任务结束")
     print(" 结果文件: data/output/dividends_summary.xlsx")
     print(" 状态报告: data/output/status_report.csv")
     print("="*60)
-    input("\n按回车键退出... (Press Enter to exit)")
+    input("\n按回车键退出...")
 
 if __name__ == "__main__":
     main()

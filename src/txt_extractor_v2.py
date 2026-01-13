@@ -4,15 +4,12 @@ import time
 import random
 import json
 import requests
-import logging
-
-logger = logging.getLogger(__name__)
 
 class TxtExtractor:
     def __init__(self):
         pass
 
-    def extract_from_file(self, file_path, api_key=None, cost_limit=0.0, current_cost=0.0, force_ai=True):
+    def extract_from_file(self, file_path, api_key=None, cost_limit=0.0, current_cost=0.0):
         """
         Extracts company name and dividend information from a single TXT file.
         Returns dict with data and cost incurred.
@@ -42,16 +39,12 @@ class TxtExtractor:
             company_name = filename.replace(".txt", "")
         
         use_ai = bool(api_key)
-        # Default force_ai to True if not specified (or passed from caller)
-        # The function signature default is currently True based on user request "I hope to have completely accurate data"
-        
         financial_data, cost = self.extract_financial_data(
             content, 
             use_ai=use_ai, 
             api_key=api_key,
             cost_limit=cost_limit,
-            current_cost=current_cost,
-            force_ai=force_ai
+            current_cost=current_cost
         )
         
         return {
@@ -74,14 +67,10 @@ class TxtExtractor:
         """
         return self.extract_financial_data(content, use_ai, api_key, cost_limit, current_cost)
 
-    def extract_financial_data(self, content, use_ai=False, api_key=None, cost_limit=0.0, current_cost=0.0, force_ai=False):
+    def extract_financial_data(self, content, use_ai=False, api_key=None, cost_limit=0.0, current_cost=0.0):
         """
         Enhanced extraction of financial information (Dividends, Net Profit, Operating Cash Flow).
         Can optionally use DeepSeek API for better parsing of complex text.
-        
-        Args:
-            force_ai (bool): If True, skips regex and uses AI for all relevant chunks (if within cost limit).
-        
         Returns a tuple: (data_list, cost_incurred)
         """
         extracted_data = []
@@ -115,19 +104,16 @@ class TxtExtractor:
             for m in matches:
                 relevant_chunks.append(m.group(0).strip())
 
-        logger.info(f"Found {len(relevant_chunks)} relevant chunks.")
-
         # Process chunks
         for chunk in relevant_chunks:
             chunk_results = []
             is_ai_used = False
             
-            # 1. Try Regex First for all metrics (unless force_ai is True)
+            # 1. Try Regex First for all metrics
             regex_results = []
-            if not force_ai:
-                regex_results.extend(self._extract_metric_regex(chunk, "dividend", keywords_map["dividend"]))
-                regex_results.extend(self._extract_metric_regex(chunk, "net_profit", keywords_map["net_profit"]))
-                regex_results.extend(self._extract_metric_regex(chunk, "operating_cash_flow", keywords_map["operating_cash_flow"]))
+            regex_results.extend(self._extract_metric_regex(chunk, "dividend", keywords_map["dividend"]))
+            regex_results.extend(self._extract_metric_regex(chunk, "net_profit", keywords_map["net_profit"]))
+            regex_results.extend(self._extract_metric_regex(chunk, "operating_cash_flow", keywords_map["operating_cash_flow"]))
 
             # --- Normalize and Validate Regex Results ---
             found_metrics_quality = {} # metric -> bool (is_good)
@@ -163,27 +149,16 @@ class TxtExtractor:
                         pass
             
             # 3. Decide whether to use AI
-            # Logic:
-            # - If force_ai is True: ALWAYS use AI if cost limit allows and chunk is relevant.
-            # - Else: Use AI if missing key metrics (Hybrid mode).
-            
-            should_use_ai = False
-            
-            if use_ai and ((current_cost + cost_incurred) < cost_limit):
-                if force_ai:
-                    should_use_ai = True
-                else:
-                    missing_extraction = False
-                    for metric, kws in keywords_map.items():
-                        if any(kw in chunk for kw in kws):
-                            # Keyword present, but no good regex?
-                            if not found_metrics_quality.get(metric, False):
-                                missing_extraction = True
-                    if missing_extraction:
-                        should_use_ai = True
+            missing_extraction = False
+            for metric, kws in keywords_map.items():
+                if any(kw in chunk for kw in kws):
+                    # Keyword present, but no good regex?
+                    if not found_metrics_quality.get(metric, False):
+                        missing_extraction = True
+
+            should_use_ai = use_ai and missing_extraction and ((current_cost + cost_incurred) < cost_limit)
             
             if should_use_ai:
-                logger.info(f"Invoking AI for chunk len={len(chunk)}...")
                 ai_results, cost, prompt_used, raw_resp = self._extract_with_ai(chunk, api_key)
                 cost_incurred += cost
                 
@@ -199,7 +174,6 @@ class TxtExtractor:
                         if 'amount_with_unit' not in item:
                             item['amount_with_unit'] = f"{item.get('amount_text', '0')}万元"
                 else:
-                    # Fallback to regex if AI fails (only if we have regex results)
                     chunk_results = normalized_regex
                     if chunk_results:
                         for item in chunk_results:
@@ -262,8 +236,7 @@ class TxtExtractor:
                 "amount_text": best_val,
                 "unit": best_unit,
                 "raw_text": text,
-                "metric": metric_name,
-                "amount_with_unit": f"{best_val}{best_unit}"
+                "metric": metric_name
             })
         return results
 
@@ -295,7 +268,6 @@ class TxtExtractor:
         raw_response = ""
         
         try:
-            logger.info("Sending request to DeepSeek API...")
             response = requests.post(url, headers=headers, data=json.dumps(data), timeout=30)
             if response.status_code == 200:
                 result = response.json()
@@ -323,7 +295,7 @@ class TxtExtractor:
                                 "amount_text": str(item['amount']),
                                 "unit": item.get('unit', '万元'),
                                 "metric": item.get('metric', 'dividend'), 
-                                "raw_text": text,
+                                "raw_text": "AI Generated",
                                 "amount_with_unit": f"{item['amount']}万元"
                             })
                     return normalized, cost, prompt_content, raw_response

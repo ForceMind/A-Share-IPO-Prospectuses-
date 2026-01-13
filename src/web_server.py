@@ -15,6 +15,19 @@ import asyncio
 from src.task_manager import get_task_manager
 from src.txt_process_manager import get_txt_manager
 
+# Load API Key if exists (for production run)
+if not os.environ.get("DEEPSEEK_API_KEY"):
+    key_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "api_key.txt")
+    if os.path.exists(key_path):
+        try:
+            with open(key_path, "r", encoding="utf-8") as f:
+                key = f.read().strip()
+                if key:
+                    os.environ["DEEPSEEK_API_KEY"] = key
+                    print(f"[INFO] Loaded DEEPSEEK_API_KEY from {key_path}")
+        except Exception as e:
+            print(f"[WARNING] Failed to load api_key.txt: {e}")
+
 # Remove global instantiation to prevent multiprocessing recursive bomb
 # task_manager = get_task_manager()
 
@@ -121,9 +134,12 @@ async def websocket_txt_logs(websocket: WebSocket):
     except Exception as e:
         print(f"WebSocket error: {e}")
 
-def run_server(host="127.0.0.1", port=8001):
+def run_server(host="127.0.0.1", port=3000):
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - [PID:%(process)d] - %(levelname)s - %(message)s')
     uvicorn.run(app, host=host, port=port)
 
 if __name__ == "__main__":
+    import multiprocessing
+    # Crucial for PyInstaller or Windows multiprocessing to prevent infinite spawn loops
+    multiprocessing.freeze_support()
     run_server()

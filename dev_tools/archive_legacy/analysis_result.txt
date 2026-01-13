@@ -1,0 +1,36 @@
+DEBUGGING: 301011_华立科技.pdf
+Item 1: year: 2025, amount: 178.35
+Item 2: year: 2018, amount: 178.35
+*ISSUE:* Extracted "2025年" which is out of range or future prediction, and "2018年 ... -178.35万元" (negative value) as positive 178.35. The context shows it's a negative retained earnings (-178.35万元), not a dividend.
+
+DEBUGGING: 301012_扬电科技.pdf
+Item 1: year: 2020, amount: 20623.84
+Item 2: year: 2019, amount: 25590.69
+Item 3: year: 2018, amount: 32916.6
+*ISSUE:* These numbers (200 million+) seem way too large for dividends for a small company, likely "Cash received from sale of goods" or similar cash flow items. Context confirms "经营活动现金流入小计" (Subtotal of cash inflows from operating activities).
+
+DEBUGGING: 301013_利和兴.pdf
+Item 1: year: 2020, amount: 61993.25
+Item 2: year: 2019, amount: 64777.16
+Item 3: year: 2018, amount: 33995.46
+*ISSUE:* Similar to above, these match "经营活动现金流入小计" (Operating cash inflow subtotal). The context table headers match cash flow statement items.
+
+DEBUGGING: 301015_百洋医药.pdf
+Item 1: year: 2020, amount: 167230.81
+Item 2: year: 2019, amount: 127004.5
+Item 3: year: 2018, amount: 51554.39
+*ISSUE:* Again, cash flow items. "收回投资收到的现金" (Cash received from disposal of investments).
+Item 4: year: 2017, amount: 12285.0
+*CORRECT:* Context "派发现金股利12,285.00万元" - This one looks real.
+
+DEBUGGING: 301016_雷尔伟.pdf
+Item 1: year: 2020, amount: 15567.22
+Item 2: year: 2019, amount: 8900.11
+Item 3: year: 2018, amount: 5202.32
+*ISSUE:* These seem to be "资产总额" (Total Assets) or similar balance sheet items based on context "主要财务数据和财务指标".
+
+SUMMARY OF DIAGNOSIS:
+1. **False Positives in Tables:** The extractor is aggressively pulling tables that contain "现金" (Cash) or "分红" (Dividend) keywords but failing to validate the *specific row* accurately. It's grabbing "Cash inflows" or "Total Assets" rows because the table might be a "Key Financial Indicators" table that happens to have dividend info elsewhere, or just sharing keywords.
+2. **Context Context:** The keyword matching for tables is too loose (`any(kw in row_text ...)`).
+3. **Negative Numbers:** It ignores negative signs or treats negative retained earnings as positive dividends.
+4. **Future Years:** It extracts "2025" which is clearly not a historical dividend.
