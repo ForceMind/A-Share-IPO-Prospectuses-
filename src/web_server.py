@@ -75,15 +75,18 @@ async def update_config(download_concurrency: int = None, extract_concurrency: i
     }
 
 @app.post("/api/txt/config")
-async def update_txt_config(concurrency: int = None, cost_limit: float = None):
+async def update_txt_config(concurrency: int = None, cost_limit: float = None, force_ai: bool = None):
     if concurrency:
         get_txt_manager().set_concurrency(concurrency)
     if cost_limit is not None:
         get_txt_manager().set_cost_limit(cost_limit)
+    if force_ai is not None:
+        get_txt_manager().set_force_ai(force_ai)
     return {
         "status": "updated",
         "concurrency": get_txt_manager().status.get("concurrency"),
-        "ai_cost_limit": get_txt_manager().status.get("ai_cost_limit")
+        "ai_cost_limit": get_txt_manager().status.get("ai_cost_limit"),
+        "force_ai": get_txt_manager().status.get("force_ai")
     }
 
 @app.websocket("/ws/logs")

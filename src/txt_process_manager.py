@@ -29,7 +29,8 @@ class TxtProcessManager:
             "start_time": None,
             "elapsed_time": 0,
             "total_ai_cost": 0.0,
-            "ai_cost_limit": 10.0 # Default limit 10.00 CNY
+            "ai_cost_limit": 10.0, # Default limit 10.00 CNY
+            "force_ai": False # Force AI usage for all extractions
         }
         
         # Web UI Queue (Thread-safe)
@@ -148,6 +149,11 @@ class TxtProcessManager:
             self.status["ai_cost_limit"] = max(0.0, limit)
             logging.info(f"AI Cost Limit updated: ¥{self.status['ai_cost_limit']:.4f}")
 
+    def set_force_ai(self, enabled: bool):
+        with self._lock:
+            self.status["force_ai"] = bool(enabled)
+            logging.info(f"Force AI extraction set to: {self.status['force_ai']}")
+
     def start_tasks(self, limit: Optional[int] = None):
         if self.status["is_running"]:
             logging.warning("TXT tasks are already running")
@@ -169,14 +175,14 @@ class TxtProcessManager:
         self.mp_stop_event.set()
         self.status["is_running"] = False
         self.status["current_action"] = "Stopping..."
-        logging.info("Stopping TXT tasks...")
+        logging.info("正在停止 TXT 提取任务...")
 
     def _run_extraction(self, limit: Optional[int]):
         try:
             base_dir = os.path.join(DATA_DIR, "TXT")
             
             # --- ENHANCED FILE SELECTION LOGIC ---
-            logging.info(f"Scanning {base_dir} for TXT files...")
+            logging.info(f"正在扫描 {base_dir} 目录查找 TXT 文件...")
             
             # 1. Scan all files
             all_candidates = []
@@ -211,7 +217,7 @@ class TxtProcessManager:
                 except:
                     pass
             
-            logging.info(f"Filtering for companies listed between 2019-2023. Found {len(valid_companies)} valid company names in metadata.")
+            logging.info(f"正在筛选 2019-2023 年上市的公司。在元数据中找到 {len(valid_companies)} 个目标公司。")
 
             # --- NEW LOGIC: Merge PDF list if TXT is missing ---
             # We want to ensure we cover as many companies as possible.
@@ -225,7 +231,7 @@ class TxtProcessManager:
             # Scan PDF dir for missing companies
             pdf_candidates = []
             if os.path.exists(PDF_DIR):
-                logging.info(f"Scanning {PDF_DIR} for fallback PDFs...")
+                logging.info(f"正在扫描 {PDF_DIR} 查找补充 PDF 文件...")
                 for root, dirs, files in os.walk(PDF_DIR):
                     for file in files:
                         if file.lower().endswith(".pdf"):
@@ -275,15 +281,15 @@ class TxtProcessManager:
             # Log missing companies
             found_companies = set(company_files.keys())
             missing_companies = valid_companies - found_companies
-            logging.info(f"Coverage Report: Found Documents (TXT/PDF) for {len(found_companies)} / {len(valid_companies)} target companies.")
+            logging.info(f"覆盖率报告: 找到 TXT/PDF 文档 {len(found_companies)} / {len(valid_companies)} 个目标公司。")
             if len(missing_companies) > 0:
-                logging.info(f"Missing Documents for {len(missing_companies)} companies. Examples: {list(missing_companies)[:5]}")
+                logging.info(f"缺少文档的公司数: {len(missing_companies)}。例如: {list(missing_companies)[:5]}")
             
             if limit:
                 final_files = final_files[:limit]
                 
             self.status["total_tasks"] = len(final_files)
-            logging.info(f"Found {len(all_candidates)} total files. Selected {len(final_files)} unique files for processing after filtering.")
+            logging.info(f"扫描完毕，共发现 {len(all_candidates)} 个文件。筛选后将处理 {len(final_files)} 个唯一文件。")
             
             results = []
             stock_info_list = []
@@ -291,13 +297,14 @@ class TxtProcessManager:
             # Get API Key from env
             api_key = os.environ.get("DEEPSEEK_API_KEY")
             if api_key:
-                logging.info("DeepSeek API Key detected. AI Enhanced extraction enabled.")
+                logging.info("检测到 DeepSeek API Key，已启用 AI 增强提取。")
             else:
-                logging.info("No DeepSeek API Key found. Using Regex extraction only.")
+                logging.info("未检测到 DeepSeek API Key，仅使用正则提取。")
 
             with ProcessPoolExecutor(max_workers=self.status["concurrency"]) as executor:
+                force_ai_status = self.status.get("force_ai", False)
                 futures = {
-                    executor.submit(_process_txt_worker, f, self.mp_log_queue, self.stock_metadata, api_key, self.status["ai_cost_limit"], self.status["total_ai_cost"]): f 
+                    executor.submit(_process_txt_worker, f, self.mp_log_queue, self.stock_metadata, api_key, self.status["ai_cost_limit"], self.status["total_ai_cost"], force_ai_status): f 
                     for f in final_files
                 }
                 
@@ -321,23 +328,23 @@ class TxtProcessManager:
                             self._save_to_excel(results, stock_info_list, base_dir)
                             
                         except Exception as e:
-                            logging.error(f"Task failed: {e}")
+                            logging.error(f"任务失败: {e}")
                             self.status["failed_tasks"] += 1
                         
                         del futures[future]
 
             if self.stop_event.is_set():
-                 logging.warning("TXT extraction stopped by user.")
+                 logging.warning("TXT 提取任务已被用户停止。")
             
             # Save results to Excel
             self._save_to_excel(results, stock_info_list, base_dir)
 
         except Exception as e:
-            logging.error(f"TXT Pipeline error: {e}")
+            logging.error(f"TXT 处理流程出错: {e}")
         finally:
             self.status["is_running"] = False
             self.status["current_action"] = "Idle"
-            logging.info("TXT Extraction finished.")
+            logging.info("TXT 提取任务全部完成。")
 
     def _save_to_excel(self, dividends, stock_infos, base_dir):
         try:
@@ -347,7 +354,7 @@ class TxtProcessManager:
             dividends = dividends or []
             stock_infos = stock_infos or []
             
-            # logging.info(f"Saving to Excel. Dividends count: {len(dividends)}, Stock Info count: {len(stock_infos)}")
+            logging.info(f"正在保存数据到 Excel... (当前共获取 {len(stock_infos)} 家公司，{len(dividends)} 条财务记录)")
             
             # Helper to sanitize data for Excel
             def sanitize_df(df):
@@ -360,13 +367,13 @@ class TxtProcessManager:
                     df_info = df_info.drop_duplicates(subset=['company_name', 'filename']) # Use keys available in dict before rename
                     
                     cols_map = {
-                        'stock_name': 'Stock Name',
-                        'stock_code': 'Stock Code',
-                        'board': 'Board',
-                        'industry': 'Industry',
-                        'ipo_date': 'IPO Date',
-                        'company_name': 'Full Company Name',
-                        'filename': 'Source File'
+                        'stock_name': '股票名称',
+                        'stock_code': '股票代码',
+                        'board': '板块',
+                        'industry': '行业',
+                        'ipo_date': '上市日期',
+                        'company_name': '公司全称',
+                        'filename': '来源文件'
                     }
                     
                     # Ensure columns exist
@@ -385,29 +392,36 @@ class TxtProcessManager:
                     df_info.to_excel(writer, sheet_name='Stock List', index=False)
                 else:
                     # logging.warning("No stock info to save. Creating empty Stock List sheet.")
-                    pd.DataFrame(columns=['Stock Name', 'Stock Code', 'Board', 'Industry', 'IPO Date', 'Full Company Name', 'Source File']).to_excel(writer, sheet_name='Stock List', index=False)
+                    pd.DataFrame(columns=['股票名称', '股票代码', '板块', '行业', '上市日期', '公司全称', '来源文件']).to_excel(writer, sheet_name='Stock List', index=False)
 
                 # 2. Dividends Sheet
                 if dividends:
                     df_div = pd.DataFrame(dividends)
                     
                     cols_map_div = {
-                        'stock_name': 'Stock Name',
-                        'stock_code': 'Stock Code',
-                        'dividend_year': 'Dividend Year',
-                        'amount_with_unit': 'Dividend Amount',
-                        'raw_context': 'Context Source',
-                        'filename': 'Source File',
-                        'is_ai': 'Is AI Generated',
-                        'ai_prompt': 'AI Prompt',
-                        'ai_response': 'AI Response',
-                        'ai_cost': 'AI Cost (CNY)'
+                        'stock_name': '股票名称',
+                        'stock_code': '股票代码',
+                        'dividend_year': '年份',
+                        'amount_with_unit': '分红金额(万元)',
+                        'net_profit': '归母净利润(万元)',
+                        'operating_cash_flow': '经营现金净流(万元)',
+                        'raw_context': 'AI输入(原文)',
+                        'filename': '来源文件',
+                        'is_ai': '是否AI提取',
+                        'ai_prompt': 'AI提示词',
+                        'ai_response': 'AI输出(原始)',
+                        'ai_cost': 'AI费用(元)'
                     }
                     
                     # Ensure columns
                     for k in cols_map_div.keys():
                         if k not in df_div.columns:
                             df_div[k] = None
+                    
+                    # Clean JSON symbols from AI Response if requested
+                    if 'ai_response' in df_div.columns:
+                        # Remove json brackets and quotes for cleaner view
+                        df_div['ai_response'] = df_div['ai_response'].apply(lambda x: str(x).replace('{', '').replace('}', '').replace('[', '').replace(']', '').replace('"', '') if x else x)
 
                     # Rename and Reorder
                     df_div = df_div.rename(columns=cols_map_div)
@@ -420,19 +434,19 @@ class TxtProcessManager:
                     df_div.to_excel(writer, sheet_name='Dividends', index=False)
                 else:
                     # logging.warning("No dividends to save. Creating empty Dividends sheet.")
-                    pd.DataFrame(columns=['Stock Name', 'Stock Code', 'Dividend Year', 'Dividend Amount', 'Context Source', 'Source File', 'Is AI Generated', 'AI Prompt', 'AI Response', 'AI Cost (CNY)']).to_excel(writer, sheet_name='Dividends', index=False)
+                    pd.DataFrame(columns=['股票名称', '股票代码', '年份', '分红金额(万元)', '归母净利润(万元)', '经营现金净流(万元)', 'AI输入(原文)', '来源文件', '是否AI提取', 'AI提示词', 'AI输出(原始)', 'AI费用(元)']).to_excel(writer, sheet_name='Dividends', index=False)
             
             # Add Summary Sheet with Cost
             pd.DataFrame([{
-                "Total AI Cost (CNY)": self.status.get("total_ai_cost", 0.0),
-                "Cost Limit (CNY)": self.status.get("ai_cost_limit", 0.0),
-                "Total Tasks": self.status.get("total_tasks", 0),
-                "Completed": self.status.get("completed_tasks", 0)
+                "累计AI费用(元)": self.status.get("total_ai_cost", 0.0),
+                "费用上限(元)": self.status.get("ai_cost_limit", 0.0),
+                "总任务数": self.status.get("total_tasks", 0),
+                "已完成": self.status.get("completed_tasks", 0)
             }]).to_excel(writer, sheet_name='Summary', index=False)
             
             # logging.info(f"Results saved to {output_file}")
         except PermissionError:
-            logging.warning(f"Could not save to {output_file} because it is open. Data is buffered in memory and will be retried on next save.")
+            logging.warning(f"无法保存到 {output_file}，因为文件被占用（可能已打开）。数据缓存在内存中，将在下次保存时重试。")
             # We do NOT clear the results list, so the next successful save will include these records.
             try:
                 # Optional: Try to save to a temp file just in case the process crashes before next save
@@ -444,11 +458,11 @@ class TxtProcessManager:
             except:
                 pass
         except Exception as e:
-            logging.error(f"Failed to save Excel: {e}")
+            logging.error(f"保存 Excel 失败: {e}")
             # import traceback
             # logging.error(traceback.format_exc())
 
-def _process_txt_worker(file_path, log_queue, metadata, api_key=None, cost_limit=0.0, current_cost=0.0):
+def _process_txt_worker(file_path, log_queue, metadata, api_key=None, cost_limit=0.0, current_cost=0.0, force_ai=False):
     """
     Worker function for processing a single TXT file.
     Returns a tuple: (list_of_dividends, stock_info_dict, cost_incurred)
@@ -472,7 +486,7 @@ def _process_txt_worker(file_path, log_queue, metadata, api_key=None, cost_limit
 
     try:
         # Log start of processing for this file
-        logger.info(f"Processing file: {os.path.basename(file_path)}")
+        logger.info(f"开始处理文件: {os.path.basename(file_path)}")
         
         extractor = TxtExtractor()
         
@@ -492,18 +506,19 @@ def _process_txt_worker(file_path, log_queue, metadata, api_key=None, cost_limit
                             content += text + "\n"
                 
                 if not content:
-                    logger.warning(f"No text extracted from PDF {os.path.basename(file_path)} (Scanned?)")
+                    logger.warning(f"PDF 提取失败 (似乎没有文本内容): {os.path.basename(file_path)}")
                     return [], None, 0.0
                     
                 # Use the content for extraction
                 # We need to manually call extract_dividends_enhanced since extract_from_file expects a file path to read
                 use_ai = bool(api_key)
-                dividends, cost = extractor.extract_dividends_enhanced(
+                dividends, cost = extractor.extract_financials_enhanced(
                     content, 
                     use_ai=use_ai, 
                     api_key=api_key,
                     cost_limit=cost_limit,
-                    current_cost=current_cost
+                    current_cost=current_cost,
+                    force_ai=force_ai
                 )
                 
                 # Construct data dict manually
@@ -519,7 +534,7 @@ def _process_txt_worker(file_path, log_queue, metadata, api_key=None, cost_limit
                 }
                 
             except Exception as e:
-                logger.error(f"Error converting PDF {os.path.basename(file_path)}: {e}")
+                logger.error(f"PDF 转换错误 {os.path.basename(file_path)}: {e}")
                 return [], None, 0.0
         else:
             # Normal TXT processing
@@ -528,11 +543,12 @@ def _process_txt_worker(file_path, log_queue, metadata, api_key=None, cost_limit
                 file_path, 
                 api_key=api_key,
                 cost_limit=cost_limit,
-                current_cost=current_cost
+                current_cost=current_cost,
+                force_ai=force_ai
             )
         
         if not data:
-            logger.warning(f"No data extracted from {os.path.basename(file_path)}")
+            logger.warning(f"未提取到任何数据: {os.path.basename(file_path)}")
             return [], None, 0.0
             
         full_company_name = data['company_name']
@@ -598,7 +614,7 @@ def _process_txt_worker(file_path, log_queue, metadata, api_key=None, cost_limit
             
             if len(clean_search_name) > 2:
                 # logger is not directly available here as it's inside worker, but we set it up
-                logger.info(f"Local match failed for {full_company_name}, searching Cninfo with queries: {search_queries}")
+                logger.info(f"本地匹配失败: {full_company_name}, 正在尝试 Cninfo 在线搜索: {search_queries}")
                 try:
                     for query in search_queries:
                         cninfo_result = search_stock_cninfo(query)
@@ -609,10 +625,10 @@ def _process_txt_worker(file_path, log_queue, metadata, api_key=None, cost_limit
                                 'industry': 'Unknown', # Cninfo search doesn't return industry directly in simple search
                                 'listing_date': 'Unknown'
                             }
-                            logger.info(f"Cninfo found: {matched_info['name']} ({matched_info['code']}) using query '{query}'")
+                            logger.info(f"Cninfo 找到匹配: {matched_info['name']} ({matched_info['code']}) 使用查询词 '{query}'")
                             break
                 except Exception as e:
-                    logger.warning(f"Cninfo search failed for {full_company_name}: {e}")
+                    logger.warning(f"Cninfo 搜索失败 {full_company_name}: {e}")
 
         # --- CONSTRUCT BASIC INFO ---
         stock_name = matched_info['name'] if matched_info else "Unknown"
@@ -654,19 +670,32 @@ def _process_txt_worker(file_path, log_queue, metadata, api_key=None, cost_limit
             
         results = []
         for div in data['dividends']:
-            # Combine amount and unit if unit exists
-            amount_val = div.get('amount_text', '')
-            unit_val = div.get('unit', '')
-            if unit_val and unit_val not in amount_val:
-                amount_str = f"{amount_val}{unit_val}"
-            else:
-                amount_str = amount_val
+            # Helper: Format number or 0
+            def fmt_num(val):
+                if val is None or str(val).lower() in ['nan', 'null', 'none', '']:
+                    return 0
+                # Try to clean it up just in case
+                try:
+                    # If it's already a clean string number from valid logic
+                    return float(val)
+                except:
+                    # If it has text (e.g. from raw AI), force 0 or keep text?
+                    # User request: "only numbers, if null then 0"
+                    # We'll try to strip non-numeric except dot/minus
+                    try:
+                        import re
+                        clean = re.sub(r'[^\d\.-]', '', str(val))
+                        return float(clean)
+                    except:
+                         return 0
 
             results.append({
                 "stock_name": stock_name,
                 "stock_code": stock_code,
                 "dividend_year": div.get('year', ''),
-                "amount_with_unit": amount_str,
+                "amount_with_unit": fmt_num(div.get('amount_text')),
+                "net_profit": fmt_num(div.get('net_profit')),
+                "operating_cash_flow": fmt_num(div.get('operating_cash_flow')),
                 "raw_context": div.get('raw_text', ''),
                 "filename": filename,
                 "is_ai": div.get('is_ai', False),
@@ -678,7 +707,7 @@ def _process_txt_worker(file_path, log_queue, metadata, api_key=None, cost_limit
         return results, stock_info_record, cost_incurred
         
     except Exception as e:
-        logger.error(f"Error processing {os.path.basename(file_path)}: {e}")
+        logger.error(f"处理文件出错 {os.path.basename(file_path)}: {e}")
         return [], None, 0.0
 
 # Singleton

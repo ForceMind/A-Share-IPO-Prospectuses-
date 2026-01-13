@@ -4,14 +4,15 @@ import time
 import random
 import json
 import requests
+import logging
 
 class TxtExtractor:
     def __init__(self):
         pass
 
-    def extract_from_file(self, file_path, api_key=None, cost_limit=0.0, current_cost=0.0):
+    def extract_from_file(self, file_path, api_key=None, cost_limit=0.0, current_cost=0.0, force_ai=False):
         """
-        Extracts company name and dividend information from a single TXT file.
+        Extracts company financial information from a single TXT file.
         Returns dict with data and cost incurred.
         """
         try:
@@ -27,7 +28,7 @@ class TxtExtractor:
                     with open(file_path, 'r', encoding='gb18030') as f:
                         content = f.read()
                 except Exception as final_e:
-                    print(f"Error reading file {file_path}: {final_e}")
+                    logging.error(f"读取文件失败 {file_path}: {final_e}")
                     return None
 
         # Extract company name from filename
@@ -39,59 +40,67 @@ class TxtExtractor:
             company_name = filename.replace(".txt", "")
         
         use_ai = bool(api_key)
-        dividends, cost = self.extract_dividends_enhanced(
+        # Pass force_ai down
+        financials, cost = self.extract_financials_enhanced(
             content, 
             use_ai=use_ai, 
             api_key=api_key,
             cost_limit=cost_limit,
-            current_cost=current_cost
+            current_cost=current_cost,
+            force_ai=force_ai
         )
         
         return {
             "company_name": company_name,
             "filename": filename,
-            "dividends": dividends,
+            "dividends": financials, # Keeping key 'dividends' for compatibility, but contains all info
             "cost": cost
-        }
-        
-        return {
-            "company_name": company_name,
-            "filename": filename,
-            "dividends": dividends
         }
 
     def extract_dividends(self, content):
         """
-        Extracts dividend information using regex patterns.
-        Focuses on sentences mentioning "分红", "股利", "利润分配" and amounts.
+        Legacy wrapper.
         """
-        return self.extract_dividends_enhanced(content)
+        d, c = self.extract_financials_enhanced(content)
+        return d
 
-    def extract_dividends_enhanced(self, content, use_ai=False, api_key=None, cost_limit=0.0, current_cost=0.0):
+    def extract_dividends_enhanced(self, content, use_ai=False, api_key=None, cost_limit=0.0, current_cost=0.0, force_ai=False):
         """
-        Enhanced extraction of dividend information.
-        Can optionally use DeepSeek API for better parsing of complex text.
-        Returns a tuple: (dividends_list, cost_incurred)
+        Legacy wrapper mapped to new financial extraction.
         """
-        dividends_data = []
+        return self.extract_financials_enhanced(content, use_ai, api_key, cost_limit, current_cost, force_ai)
+
+    def extract_financials_enhanced(self, content, use_ai=False, api_key=None, cost_limit=0.0, current_cost=0.0, force_ai=False):
+        """
+        Enhanced extraction of financial information (Dividends, Net Profit, Cash Flow).
+        Returns a tuple: (data_list, cost_incurred)
+        """
+        data_list = []
         cost_incurred = 0.0
         
-        # Keywords to locate relevant paragraphs
-        keywords = ["分红", "股利分配", "现金分红", "派发现金", "利润分配", "股利支付"]
+        # Keywords for relevant paragraphs
+        # Financials Keywords
+        keywords = [
+            "分红", "股利分配", "现金分红", "派发现金", "利润分配", "股利支付", 
+            "权益分派", "分配方案", "每10股", "利益分配", 
+            "归属于母公司所有者的净利润", "归母净利润", "净利润",
+            "经营活动产生的现金流量净额", "经营现金净流", "现金流量净额"
+        ]
         keyword_pattern = "|".join(keywords)
         
         # Split content into paragraphs or chunks
-        chunks = re.split(r'\n\s*\n', content) # Split by empty lines
+        chunks = re.split(r'\n\s*\n', content) 
         
         relevant_chunks = []
         for chunk in chunks:
             if re.search(keyword_pattern, chunk):
                 clean_chunk = chunk.strip()
-                if len(clean_chunk) > 10 and len(clean_chunk) < 2000:
+                if len(clean_chunk) > 10 and len(clean_chunk) < 3000: # Increased limit slightly for context
                     relevant_chunks.append(clean_chunk)
         
         if not relevant_chunks:
-            matches = re.finditer(f"(.{{0,200}})({keyword_pattern})(.{{0,200}})", content, re.DOTALL)
+            # Fallback for splitting failure
+            matches = re.finditer(f"(.{{0,200}})({keyword_pattern})(.{{0,300}})", content, re.DOTALL)
             for m in matches:
                 relevant_chunks.append(m.group(0).strip())
 
@@ -100,57 +109,38 @@ class TxtExtractor:
             extracted = []
             is_ai_used = False
             
-            # 1. Try Regex First
-            regex_results = self._extract_with_regex_v2(chunk)
-            
-            # --- Normalize and Validate Regex Results ---
-            is_good_quality = False
+            # 1. Try Regex First (Always try regex to have a baseline context)
+            regex_results = self._extract_financials_with_regex(chunk)
             if regex_results:
-                for res in regex_results:
-                    try:
-                        val_str = res['amount_text'].replace(',', '')
-                        val = float(val_str)
-                        # Handle negative numbers (cash flow outflow) -> convert to absolute
-                        val = abs(val)
-                        
-                        unit = res['unit']
-                        
-                        # Normalize to 万元 (Ten Thousand Yuan)
-                        if unit == '元':
-                            val = val / 10000.0
-                            unit = '万元'
-                        elif unit in ['亿元', '亿']:
-                            val = val * 10000.0
-                            unit = '万元'
-                        
-                        # Update the result with normalized value
-                        res['amount_text'] = f"{val:.6f}".rstrip('0').rstrip('.')
-                        res['unit'] = '万元'
-                        
-                        # Quality Check:
-                        # If value > 50 (500,000 RMB), we consider it a likely valid Total Amount.
-                        # If value is small (e.g. 0.5), it might be a per-share amount that Regex wrongly picked up,
-                        # or a very small dividend. We mark it as low quality to trigger AI verification.
-                        if val > 50:
-                            is_good_quality = True
-                            
-                    except Exception as e:
-                        # If conversion fails, treat as low quality
-                        pass
-            
-            # 3. Decide whether to use AI
+                 logging.debug(f"正则提取到 {len(regex_results)} 候选条目 - 原文片段: {chunk[:20]}...")
+
+            # 2. Decide AI usage
             # Use AI if:
-            # - AI is enabled
-            # - Regex failed OR Regex result is "low quality" (small amount or parse error)
-            # - Cost limit not reached
+            # - Force AI is ON (and check for extracting extracted text in prompt)
+            # - OR (Use AI is ON AND (Regex failed or not perfect) AND Cost limit ok)
             
-            should_use_ai = use_ai and (not is_good_quality) and ((current_cost + cost_incurred) < cost_limit)
+            should_use_ai = False
+            ai_reason = ""
+            
+            if use_ai:
+                if force_ai:
+                    # If force AI is on, we process ALL relevant chunks with AI
+                    should_use_ai = True
+                    ai_reason = "强制AI模式开启"
+                elif ((current_cost + cost_incurred) < cost_limit):
+                     # If not forced, use heuristic: Use AI if regex didn't find good data
+                     # What is "good data"? Let's say if we found nothing valid.
+                     if not regex_results:
+                         should_use_ai = True
+                         ai_reason = "正则未提取到数据且费用额度充足"
             
             if should_use_ai:
+                logging.info(f"调用 AI 提取 ({ai_reason})...")
                 ai_results, cost, prompt_used, raw_resp = self._extract_with_ai(chunk, api_key)
                 cost_incurred += cost
                 
                 if ai_results:
+                    logging.info(f"AI 提取成功: 找到 {len(ai_results)} 条记录, 本次费用: ¥{cost:.4f}")
                     extracted = ai_results
                     is_ai_used = True
                     for item in extracted:
@@ -158,9 +148,9 @@ class TxtExtractor:
                         item['ai_response'] = raw_resp
                         item['ai_cost'] = cost
                 else:
-                    # Fallback to regex if AI fails
+                    logging.warning(f"AI 提取失败或返回空结果。")
+                    # AI failed, fallback to regex
                     extracted = regex_results
-                    # Attach AI failure info to regex results if available
                     if extracted:
                         for item in extracted:
                             item['ai_prompt'] = prompt_used
@@ -169,129 +159,131 @@ class TxtExtractor:
                             item['is_ai_fallback'] = True
             else:
                 extracted = regex_results
+                if not extracted and use_ai:
+                     if (current_cost + cost_incurred) >= cost_limit:
+                         logging.info("跳过 AI: 费用达到上限")
 
             if extracted:
                 for item in extracted:
                     item['is_ai'] = is_ai_used
-                dividends_data.extend(extracted)
+                    item['is_forced_ai'] = force_ai
+                data_list.extend(extracted)
 
-        # Deduplicate based on year and amount
-        unique_dividends = []
-        seen = set()
-        for d in dividends_data:
-            try:
-                amt = float(d['amount_text'].replace(',', ''))
-            except:
-                amt = d['amount_text']
+        # Deduplicate Logic
+        merged_data = {} # Year -> Data Dict
+        
+        for d in data_list:
+            year = d.get('year')
+            if not year: continue
             
-            key = (d['year'], amt)
-            if key not in seen:
-                seen.add(key)
-                unique_dividends.append(d)
+            if year not in merged_data:
+                merged_data[year] = d
+            else:
+                # Merge fields if missing in current
+                curr = merged_data[year]
                 
-        return unique_dividends, cost_incurred
+                def update_field(field):
+                    val = d.get(field)
+                    if val and str(val).lower() != 'nan' and str(val).lower() != 'null' and str(val) != '' and str(val) != 'None':
+                         if not curr.get(field) or str(curr.get(field)) == '':
+                             curr[field] = val
+                
+                update_field('amount_text') # Dividend
+                update_field('net_profit')
+                update_field('operating_cash_flow')
+                
+                # Keep the one with AI if possible
+                if d.get('is_ai') and not curr.get('is_ai'):
+                    curr.update(d)
+                
+                # Combine raw texts for context
+                if d.get('raw_text') and d['raw_text'] not in curr.get('raw_text', ''):
+                    curr['raw_text'] = (curr.get('raw_text', '') + " || " + d['raw_text']).strip(" || ")
 
-    def _extract_with_regex_v2(self, text):
+        return list(merged_data.values()), cost_incurred
+
+    def _extract_financials_with_regex(self, text):
         """
-        Improved Regex extraction prioritizing total amounts over per-share amounts.
+        Regex extraction for Dividends, Net Profit, and Cash Flow.
         """
         results = []
         year_pattern = r"(20(?:1[7-9]|2[0-5]))年(?:度)?"
-        
-        # Find years
         years = re.findall(year_pattern, text)
         if not years:
             return []
-        year = years[0] # Assume first year found is the context
+        year = years[0]
         
-        # Pattern 1: Explicit Total Amount (High Priority)
-        # "合计派发...X万元", "共计...X万元", "派发现金...X万元"
-        # We look for "Total" keywords near numbers
-        total_keywords = r"(?:合计|共计|总额|总计|派发现金|现金分红)"
-        # Allow negative numbers (e.g. cash flow outflow)
-        amount_num = r"(-?\d{1,3}(?:,\d{3})*(?:\.\d+)?)"
+        data = {"year": year, "raw_text": text, "unit": "万元"}
+        
+        # Helper Patterns
+        amount_num = r"(-?\d{1,4}(?:,\d{3})*(?:\.\d+)?)"
         amount_unit = r"(?:万?元|亿元|亿)"
-        
-        # Search for: Keyword ... Number ... Unit
-        # We want to capture the number that follows a "Total" keyword
-        p_total = re.compile(f"({total_keywords}[^0-9]{{0,50}}?{amount_num}\s*({amount_unit}))")
-        
-        matches = p_total.findall(text)
-        
-        candidates = []
-        for m in matches:
-            full_str, val, unit = m
-            candidates.append((val, unit, 10)) # Priority 10
-            
-        # Pattern 2: Fallback - Any number with "万元" or "亿元" (Medium Priority)
-        # If we didn't find explicit "Total" keyword, but we see "3000万元", it's likely the total.
-        if not candidates:
-            p_large_unit = re.compile(f"({amount_num}\s*(万元|亿元|亿))")
-            matches_large = p_large_unit.findall(text)
-            for m in matches_large:
-                full_str, val, unit = m
-                candidates.append((val, unit, 5)) # Priority 5
 
-        # Pattern 3: Fallback - Any large number > 10000 with "元" (Low Priority)
-        if not candidates:
-            p_yuan = re.compile(f"({amount_num}\s*(元))")
-            matches_yuan = p_yuan.findall(text)
-            for m in matches_yuan:
-                full_str, val, unit = m
-                try:
-                    v_float = float(val.replace(',', ''))
-                    if v_float > 10000:
-                        candidates.append((val, unit, 1)) # Priority 1
-                except:
-                    pass
+        # 1. Dividends
+        total_keywords = r"(?:合计|共计|总额|总计|派发现金|现金分红)"
+        p_div = re.compile(f"({total_keywords}[^0-9\n]{{0,50}}?{amount_num}\s*({amount_unit}))")
+        m_div = p_div.findall(text)
+        if m_div:
+            val, unit = m_div[0][1], m_div[0][2]
+            data['amount_text'] = self._normalize_amount(val, unit)
 
-        # If we still have nothing, maybe it's just per share? 
-        # User wants to avoid per share if possible, but if that's all we have...
-        # Actually user said "You didn't extract correctly" implying we missed the total.
-        # So we should NOT return per share if we are looking for total.
+        # 2. Net Profit (归母净利润)
+        p_np = re.compile(f"(归.*?净利润)[^0-9\n]{{0,30}}?{amount_num}\s*({amount_unit})")
+        m_np = p_np.findall(text)
+        if m_np:
+            val, unit = m_np[0][1], m_np[0][2]
+            data['net_profit'] = self._normalize_amount(val, unit)
         
-        if candidates:
-            # Sort by priority
-            candidates.sort(key=lambda x: x[2], reverse=True)
-            best_val, best_unit, _ = candidates[0]
-            
-            results.append({
-                "year": year,
-                "amount_text": best_val,
-                "unit": best_unit,
-                "raw_text": text
-            })
-            
-        return results
+        # 3. Operating Cash Flow (经营现金流)
+        p_ocf = re.compile(f"(经营.*?现金流量净额)[^0-9\n]{{0,30}}?{amount_num}\s*({amount_unit})")
+        m_ocf = p_ocf.findall(text)
+        if m_ocf:
+            val, unit = m_ocf[0][1], m_ocf[0][2]
+            data['operating_cash_flow'] = self._normalize_amount(val, unit)
 
-    def _extract_with_regex(self, text):
-        # Deprecated, mapped to v2
-        return self._extract_with_regex_v2(text)
+        if 'amount_text' in data or 'net_profit' in data or 'operating_cash_flow' in data:
+            return [data]
+        return []
+
+    def _normalize_amount(self, val_str, unit):
+        try:
+            # Clean string
+            clean_str = str(val_str).replace(',', '').replace(' ', '')
+            val = float(clean_str)
+            
+            unit = str(unit).strip()
+            if unit == '元':
+                val = val / 10000.0
+            elif unit in ['亿元', '亿']:
+                val = val * 10000.0
+            # Return string formatted, stripped of trailing zeros
+            res = f"{val:.6f}".rstrip('0').rstrip('.')
+            return res if res != '' else '0'
+        except:
+            return '0'
 
     def _extract_with_ai(self, text, api_key):
-        # Rate limiting: Sleep 0.5-1.5s to prevent hitting API limits across multiple processes
         time.sleep(random.uniform(0.5, 1.5))
-        
         url = "https://api.deepseek.com/chat/completions"
-        
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}"
-        }
+        headers = { "Content-Type": "application/json", "Authorization": f"Bearer {api_key}" }
         
         prompt_content = f"""
-        请从以下文本中提取公司分红信息。
+        请从以下文本中提取公司财务信息。
         文本: "{text}"
         
+        任务:
+        1. 提取 **年份** (会计年度)。
+        2. 提取 **现金分红总金额** (amount)。
+        3. 提取 **归属于母公司所有者的净利润** (net_profit)。
+        4. 提取 **经营活动产生的现金流量净额** (operating_cash_flow)。
+        
         要求:
-        1. 提取年份（会计年度）和分红总金额（数值和单位）。
-        2. **只提取分红总金额**，忽略“每10股派发”或“每股派发”的单价金额。
-        3. **统一将金额转换为“万元”**。如果原文是“元”，请除以10000；如果是“亿元”，请乘以10000。
-        4. **如果金额为负数（如表示现金流出），请提取其绝对值**。
-        5. 如果文本中包含多个年份的分红，请分别提取。
-        6. 如果没有分红总金额信息，返回空列表。
-        7. 返回格式必须为 JSON 列表，例如: [{{"year": "2020", "amount": "1000", "unit": "万元"}}]
-        8. 只返回 JSON，不要包含其他文字。
+        - 统一将金额转换为 **万元**。如果是元除以10000，如果是亿元乘以10000。
+        - **分红总金额**: 忽略每股金额，只取总额。若无总额但有每股及股本可估算，若不可估算则留空。
+        - **金额格式**: 纯数字，不要千分位逗号。
+        - **JSON格式**: 返回列表，如: [{{"year": "2020", "amount": "1000", "net_profit": "5000", "operating_cash_flow": "2000"}}]
+        - 如果某项信息缺失，对应字段填 null 或空字符串 ""。
+        - 仅返回 JSON 列表 array，不要包含 Markdown 格式 (如 ```json ... ```)。不要包含其他文字。
         """
         
         data = {
@@ -303,15 +295,13 @@ class TxtExtractor:
         
         cost = 0.0
         raw_response = ""
+        prompt_used = prompt_content
         
         try:
             response = requests.post(url, headers=headers, data=json.dumps(data), timeout=30)
             if response.status_code == 200:
                 result = response.json()
                 
-                # Calculate Cost (CNY)
-                # Input: 2 CNY / 1M tokens
-                # Output: 3 CNY / 1M tokens
                 usage = result.get('usage', {})
                 prompt_tokens = usage.get('prompt_tokens', len(prompt_content))
                 completion_tokens = usage.get('completion_tokens', 100)
@@ -320,27 +310,27 @@ class TxtExtractor:
                 
                 content = result['choices'][0]['message']['content']
                 raw_response = content
-                content = content.replace("```json", "").replace("```", "").strip()
+                
+                # Cleanup output
+                content_clean = content.replace("```json", "").replace("```", "").strip()
                 
                 try:
-                    extracted_data = json.loads(content)
+                    extracted_data = json.loads(content_clean)
+                    # Normalize keys
                     for item in extracted_data:
+                        item['amount_text'] = str(item.get('amount', '') or '')
+                        item['net_profit'] = str(item.get('net_profit', '') or '')
+                        item['operating_cash_flow'] = str(item.get('operating_cash_flow', '') or '')
+                        item['unit'] = '万元'
                         item['raw_text'] = text
-                        item['amount_text'] = str(item.get('amount', ''))
-                        if 'unit' not in item:
-                            item['unit'] = ''
-                    return extracted_data, cost, prompt_content, raw_response
+                        
+                    return extracted_data, cost, prompt_used, raw_response
                 except json.JSONDecodeError:
-                    return [], cost, prompt_content, raw_response
+                    return [], cost, prompt_used, raw_response
             else:
-                return [], 0.0, prompt_content, f"Error: {response.status_code} - {response.text}"
+                return [], 0.0, prompt_used, f"Error: {response.status_code} - {response.text}"
         except Exception as e:
-            return [], 0.0, prompt_content, f"Exception: {str(e)}"
-
-
+            return [], 0.0, prompt_used, f"Exception: {str(e)}"
 
 if __name__ == "__main__":
-    # Test on a file
-    extractor = TxtExtractor()
-    # Replace with a valid path for testing if needed, or rely on runner
     pass
