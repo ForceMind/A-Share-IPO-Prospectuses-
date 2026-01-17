@@ -285,14 +285,84 @@ class TxtProcessManager:
             if len(missing_companies) > 0:
                 logging.info(f"缺少文档的公司数: {len(missing_companies)}。例如: {list(missing_companies)[:5]}")
             
+             # --- RESUME LOGIC: Load existing results to skip processed files ---
+            output_file = os.path.join(base_dir, "extracted_dividends.xlsx")
+            processed_files = set()
+            results = []
+            stock_info_list = []
+            
+            if os.path.exists(output_file):
+                try:
+                    logging.info(f"发现已有结果文件，正在检查需跳过的任务...")
+                    # Load Stock Info
+                    df_existing_stock = pd.read_excel(output_file, sheet_name='Stock List')
+                    
+                    # Map Excel headers back to internal keys
+                    rev_cols_map = {v: k for k, v in {
+                        'stock_name': '股票名称', 'stock_code': '股票代码', 'board': '板块',
+                        'industry': '行业', 'ipo_date': '上市日期', 'company_name': '公司全称',
+                        'filename': '来源文件'
+                    }.items()}
+                    
+                    # Convert column names if they exist
+                    df_existing_stock = df_existing_stock.rename(columns=rev_cols_map)
+                    
+                    # Identify processed filenames
+                    if 'filename' in df_existing_stock.columns:
+                        processed_files = set(df_existing_stock['filename'].dropna().tolist())
+                        
+                        # Load existing stock info into memory so we don't lose it on save
+                        # Only keep columns we recognize to avoid schema drift issues
+                        valid_keys = set(rev_cols_map.values())
+                        existing_records = df_existing_stock.to_dict('records')
+                        
+                        # Filter keys for each record
+                        for rec in existing_records:
+                            safe_rec = {k: rec.get(k) for k in valid_keys if k in rec}
+                            stock_info_list.append(safe_rec)
+
+                    # Load Dividends to preserve data
+                    try:
+                        df_existing_div = pd.read_excel(output_file, sheet_name='Dividends')
+                        rev_cols_map_div = {v: k for k, v in {
+                            'stock_name': '股票名称', 'stock_code': '股票代码', 'dividend_year': '年份',
+                            'amount_with_unit': '分红金额(万元)', 'net_profit': '归母净利润(万元)',
+                            'operating_cash_flow': '经营现金净流(万元)', 'raw_context': 'AI输入(原文)',
+                            'filename': '来源文件', 'is_ai': '是否AI提取', 'ai_prompt': 'AI提示词',
+                            'ai_response': 'AI输出(原始)', 'ai_cost': 'AI费用(元)'
+                        }.items()}
+                        
+                        df_existing_div = df_existing_div.rename(columns=rev_cols_map_div)
+                        
+                        # Filter keys
+                        valid_div_keys = set(rev_cols_map_div.values())
+                        existing_divs = df_existing_div.to_dict('records')
+                        
+                        for rec in existing_divs:
+                             safe_rec = {k: rec.get(k) for k in valid_div_keys if k in rec}
+                             results.append(safe_rec)
+                             
+                    except Exception as e:
+                        logging.warning(f"读取分红表失败 (可能是新文件): {e}")
+
+                    logging.info(f"断点续传已加载: 此前已处理 {len(processed_files)} 个文件 (包含 {len(results)} 条分红数据)")
+                    
+                except Exception as e:
+                    logging.warning(f"加载旧数据失败，将全量重新运行: {e}")
+            
+            # Filter final_files based on processed_files
+            if processed_files:
+                original_count = len(final_files)
+                final_files = [f for f in final_files if os.path.basename(f) not in processed_files]
+                logging.info(f"过滤后剩余任务: {len(final_files)} (跳过了 {original_count - len(final_files)} 个)")
+
             if limit:
                 final_files = final_files[:limit]
                 
             self.status["total_tasks"] = len(final_files)
             logging.info(f"扫描完毕，共发现 {len(all_candidates)} 个文件。筛选后将处理 {len(final_files)} 个唯一文件。")
             
-            results = []
-            stock_info_list = []
+            # results and stock_info_list are already initialized (and potentially populated) above
             
             # Get API Key from env
             api_key = os.environ.get("DEEPSEEK_API_KEY")
@@ -358,7 +428,8 @@ class TxtProcessManager:
             
             # Helper to sanitize data for Excel
             def sanitize_df(df):
-                return df.applymap(lambda x: ILLEGAL_CHARACTERS_RE.sub('', str(x)) if isinstance(x, str) else x)
+                # Use map instead of applymap (deprecated)
+                return df.map(lambda x: ILLEGAL_CHARACTERS_RE.sub('', str(x)) if isinstance(x, str) else x)
 
             with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
                 # 1. Stock Info Sheet
